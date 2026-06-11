@@ -13,6 +13,13 @@ spec:
   {{- with .Values.ingress.className }}
   ingressClassName: {{ . }}
   {{- end }}
+  {{- if .Values.ingress.defaultBackend }}
+  defaultBackend:
+    service:
+      name: {{ include "centaur.componentName" (dict "root" . "component" "slackbot") }}
+      port:
+        number: 3001
+  {{- else }}
   rules:
     - {{- if .Values.ingress.host }}
       host: {{ .Values.ingress.host | quote }}
@@ -26,6 +33,7 @@ spec:
                 name: {{ include "centaur.componentName" (dict "root" . "component" "slackbot") }}
                 port:
                   number: 3001
+  {{- end }}
   {{- with .Values.ingress.tls }}
   tls:
 {{ toYaml . | nindent 4 }}

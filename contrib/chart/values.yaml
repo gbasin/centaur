@@ -247,6 +247,9 @@ postgres:
 ingress:
   enabled: false
   className: ""
+  # When true, render a single spec.defaultBackend instead of host/path rules.
+  # Required by the Tailscale operator's Funnel Ingress; harmless otherwise.
+  defaultBackend: false
   annotations: {}
   host: centaur.local
   tls: []

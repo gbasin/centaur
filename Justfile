@@ -106,6 +106,13 @@ deploy:
         --set sandbox.extraEnv.CLAUDE_CODE_AUTH_MODE=${CLAUDE_CODE_AUTH_MODE}
       )
     fi
+    # Layer an optional local-only values file (e.g. Tailscale Funnel ingress) on
+    # top of values.dev.yaml. Kept out of the shared dev values so teammates'
+    # `just up` is unaffected. Appended after -f {{dev_values}} so it wins
+    # (helm applies -f files left-to-right).
+    if [[ -n "${CENTAUR_EXTRA_VALUES:-}" ]]; then
+      extra_args+=(-f "${CENTAUR_EXTRA_VALUES}")
+    fi
     helm upgrade --install {{release}} {{chart}} -n {{namespace}} --create-namespace -f {{dev_values}} ${extra_args[@]+"${extra_args[@]}"}
 
 # Bring up the dev stack; pass `k3s` (just up k3s) to import local images into k3s's containerd.
