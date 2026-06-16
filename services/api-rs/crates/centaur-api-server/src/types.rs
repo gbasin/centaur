@@ -62,6 +62,15 @@ pub struct ExecuteSessionResponse {
     pub status: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct CancelSessionResponse {
+    pub ok: bool,
+    pub cancelled: bool,
+    pub execution_id: Option<String>,
+    pub stopped_sandbox_id: Option<String>,
+    pub stop_error: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct EventsQuery {
     pub after_event_id: Option<i64>,

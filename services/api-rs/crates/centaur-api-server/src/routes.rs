@@ -42,9 +42,10 @@ use tracing::Span;
 use crate::{
     ApiError,
     types::{
-        AppendMessagesRequest, AppendMessagesResponse, CreateSessionRequest, CreateSessionResponse,
-        EmitWorkflowEventRequest, EventsQuery, ExecuteSessionRequest, ExecuteSessionResponse,
-        ListWorkflowRunsQuery, OnHarnessConflict, SessionSseEvent, stream_error_sse,
+        AppendMessagesRequest, AppendMessagesResponse, CancelSessionResponse, CreateSessionRequest,
+        CreateSessionResponse, EmitWorkflowEventRequest, EventsQuery, ExecuteSessionRequest,
+        ExecuteSessionResponse, ListWorkflowRunsQuery, OnHarnessConflict, SessionSseEvent,
+        stream_error_sse,
     },
 };
 
@@ -94,6 +95,7 @@ pub fn build_router_with_session_and_workflow_runtime(
             "/api/session/{thread_key}/execute",
             post(execute_session).layer(DefaultBodyLimit::disable()),
         )
+        .route("/api/session/{thread_key}/cancel", post(cancel_session))
         .route("/api/session/{thread_key}/events", get(stream_events))
         .route("/api/sandboxes/drain", post(drain_sandboxes))
         .route("/api/workflows/schedules", get(list_workflow_schedules))
@@ -272,6 +274,21 @@ async fn drain_sandboxes(State(state): State<AppState>) -> Result<Json<Value>, A
         "stopped": report.stopped,
         "failed": failed,
     })))
+}
+
+async fn cancel_session(
+    State(state): State<AppState>,
+    Path(raw_thread_key): Path<String>,
+) -> Result<Json<CancelSessionResponse>, ApiError> {
+    let thread_key = ThreadKey::try_from(raw_thread_key)?;
+    let outcome = state.runtime.cancel_session(&thread_key).await?;
+    Ok(Json(CancelSessionResponse {
+        ok: outcome.stop_error.is_none(),
+        cancelled: outcome.cancelled,
+        execution_id: outcome.execution_id,
+        stopped_sandbox_id: outcome.stopped_sandbox_id,
+        stop_error: outcome.stop_error,
+    }))
 }
 
 async fn stream_events(
