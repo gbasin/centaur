@@ -676,6 +676,8 @@ impl SessionRuntime {
         question_id: &str,
         answers: Value,
     ) -> Result<AnswerQuestionOutcome, AnswerQuestionError> {
+        let operation_lock = self.session_operation_lock(thread_key).await;
+        let _operation_guard = operation_lock.lock().await;
         let execution = self
             .store
             .get_execution_optional(execution_id)
@@ -5355,6 +5357,124 @@ mod adoption_tests {
             all.iter()
                 .any(|event| event.event_type == "session.question_answer_delivered"),
             "expected answer delivery event"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_question_answers_deliver_once() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key = ThreadKey::parse(format!(
+            "test:answer-question-race-{}",
+            uuid::Uuid::new_v4()
+        ))
+        .unwrap();
+        let execution_id =
+            orphaned_execution(&store, &thread_key, Some("sbx-answer-race"), true).await;
+        store
+            .append_event(
+                &thread_key,
+                Some(&execution_id),
+                SESSION_OUTPUT_LINE_EVENT,
+                Value::String(
+                    json!({
+                        "type": "question_requested",
+                        "question_id": "q-1",
+                        "turn_id": "turn-1",
+                        "questions": [],
+                    })
+                    .to_string(),
+                ),
+            )
+            .await
+            .expect("append question event");
+
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let (io, _stdout, stdin) = mock_io();
+        backend.push_io(io).await;
+        let runtime = runtime_with(&store, backend.clone());
+        let barrier = Arc::new(Barrier::new(3));
+
+        let first = {
+            let runtime = runtime.clone();
+            let thread_key = thread_key.clone();
+            let execution_id = execution_id.clone();
+            let barrier = barrier.clone();
+            tokio::spawn(async move {
+                barrier.wait().await;
+                runtime
+                    .answer_execution_question(
+                        &thread_key,
+                        &execution_id,
+                        "q-1",
+                        json!({"choice": {"answers": ["A"]}}),
+                    )
+                    .await
+            })
+        };
+        let second = {
+            let runtime = runtime.clone();
+            let thread_key = thread_key.clone();
+            let execution_id = execution_id.clone();
+            let barrier = barrier.clone();
+            tokio::spawn(async move {
+                barrier.wait().await;
+                runtime
+                    .answer_execution_question(
+                        &thread_key,
+                        &execution_id,
+                        "q-1",
+                        json!({"choice": {"answers": ["B"]}}),
+                    )
+                    .await
+            })
+        };
+
+        barrier.wait().await;
+        let first = first.await.expect("first task");
+        let second = second.await.expect("second task");
+        let successes = [first.as_ref(), second.as_ref()]
+            .into_iter()
+            .filter(|result| result.is_ok())
+            .count();
+        let stale = [first.as_ref(), second.as_ref()]
+            .into_iter()
+            .filter(|result| matches!(result, Err(AnswerQuestionError::QuestionNotPending)))
+            .count();
+        assert_eq!(successes, 1);
+        assert_eq!(stale, 1);
+        assert_eq!(backend.opens(), 1);
+
+        let mut reader = BufReader::new(stdin);
+        let mut delivered = String::new();
+        tokio::time::timeout(Duration::from_secs(1), reader.read_line(&mut delivered))
+            .await
+            .expect("timely answer line")
+            .expect("read delivered answer");
+        let delivered: Value = serde_json::from_str(delivered.trim()).expect("answer json");
+        assert_eq!(delivered["type"], "question_answer");
+        assert_eq!(delivered["question_id"], "q-1");
+        assert!(
+            delivered["answers"]["choice"]["answers"][0] == "A"
+                || delivered["answers"]["choice"]["answers"][0] == "B"
+        );
+
+        let mut extra = String::new();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), reader.read_line(&mut extra))
+                .await
+                .is_err(),
+            "unexpected extra answer line: {extra:?}"
+        );
+
+        let all = events(&store, &thread_key).await;
+        assert_eq!(
+            all.iter()
+                .filter(|event| event.event_type == "session.question_answer_delivered")
+                .count(),
+            1
         );
     }
 
