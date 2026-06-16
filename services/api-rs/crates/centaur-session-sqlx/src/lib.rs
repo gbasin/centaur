@@ -288,6 +288,15 @@ impl PgSessionStore {
         &self,
         execution_id: &str,
     ) -> Result<SessionExecution, SessionStoreError> {
+        self.get_execution_optional(execution_id)
+            .await?
+            .ok_or_else(|| SessionStoreError::Sqlx(sqlx::Error::RowNotFound))
+    }
+
+    pub async fn get_execution_optional(
+        &self,
+        execution_id: &str,
+    ) -> Result<Option<SessionExecution>, SessionStoreError> {
         let row = sqlx::query_as::<_, SessionExecutionRow>(
             r#"
             select execution_id, idempotency_key, thread_key, status, metadata, error, created_at, updated_at, started_at, completed_at
@@ -296,10 +305,10 @@ impl PgSessionStore {
             "#,
         )
         .bind(execution_id)
-        .fetch_one(&self.pool)
+        .fetch_optional(&self.pool)
         .await?;
 
-        row.try_into()
+        row.map(TryInto::try_into).transpose()
     }
 
     pub async fn mark_execution_running(

@@ -63,6 +63,21 @@ pub struct ExecuteSessionResponse {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct AnswerQuestionRequest {
+    pub question_id: String,
+    #[serde(default)]
+    pub answers: Value,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct AnswerQuestionResponse {
+    pub ok: bool,
+    pub execution_id: String,
+    pub thread_key: ThreadKey,
+    pub status: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CancelSessionResponse {
     pub ok: bool,
     pub cancelled: bool,

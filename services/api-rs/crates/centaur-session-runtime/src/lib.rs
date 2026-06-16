@@ -129,6 +129,32 @@ pub struct CancelSessionOutcome {
     pub stop_error: Option<String>,
 }
 
+/// Result of answering a pending user-input question for a running execution.
+#[derive(Clone, Debug)]
+pub struct AnswerQuestionOutcome {
+    pub execution_id: String,
+    pub thread_key: ThreadKey,
+    pub status: String,
+}
+
+#[derive(Debug, Error)]
+pub enum AnswerQuestionError {
+    #[error("Execution not found")]
+    ExecutionNotFound,
+    #[error("Execution is not running")]
+    ExecutionNotRunning,
+    #[error("Question is not pending")]
+    QuestionNotPending,
+    #[error(transparent)]
+    Runtime(#[from] SessionRuntimeError),
+}
+
+impl From<SessionStoreError> for AnswerQuestionError {
+    fn from(error: SessionStoreError) -> Self {
+        Self::Runtime(SessionRuntimeError::Store(error))
+    }
+}
+
 #[derive(Debug)]
 pub struct ExecuteSessionInput {
     pub idempotency_key: Option<String>,
@@ -641,6 +667,110 @@ impl SessionRuntime {
         }
         .instrument(span.clone())
         .await
+    }
+
+    pub async fn answer_execution_question(
+        &self,
+        thread_key: &ThreadKey,
+        execution_id: &str,
+        question_id: &str,
+        answers: Value,
+    ) -> Result<AnswerQuestionOutcome, AnswerQuestionError> {
+        let execution = self
+            .store
+            .get_execution_optional(execution_id)
+            .await?
+            .ok_or(AnswerQuestionError::ExecutionNotFound)?;
+        if execution.thread_key != *thread_key {
+            return Err(AnswerQuestionError::ExecutionNotFound);
+        }
+        if execution.status != ExecutionStatus::Running {
+            return Err(AnswerQuestionError::ExecutionNotRunning);
+        }
+
+        let active = self.store.active_execution_for_thread(thread_key).await?;
+        if active.as_ref().map(|active| active.execution_id.as_str()) != Some(execution_id) {
+            return Err(AnswerQuestionError::ExecutionNotRunning);
+        }
+
+        if !self
+            .execution_question_is_pending(thread_key, execution_id, question_id)
+            .await?
+        {
+            return Err(AnswerQuestionError::QuestionNotPending);
+        }
+
+        let pipe = self
+            .wait_for_active_steering_pipe(thread_key, execution_id)
+            .await
+            .map_err(|_| AnswerQuestionError::ExecutionNotRunning)?;
+        let answers = if answers.is_object() {
+            answers
+        } else {
+            json!({})
+        };
+        let line = json!({
+            "type": "question_answer",
+            "question_id": question_id,
+            "answers": answers,
+        })
+        .to_string();
+        write_input_lines(&pipe, &[line], thread_key, execution_id, None).await?;
+
+        self.store
+            .append_event(
+                thread_key,
+                Some(execution_id),
+                "session.question_answer_delivered",
+                json!({
+                    "execution_id": execution_id,
+                    "thread_key": thread_key.as_str(),
+                    "question_id": question_id,
+                }),
+            )
+            .await?;
+
+        Ok(AnswerQuestionOutcome {
+            execution_id: execution_id.to_owned(),
+            thread_key: thread_key.clone(),
+            status: "answered".to_owned(),
+        })
+    }
+
+    async fn execution_question_is_pending(
+        &self,
+        thread_key: &ThreadKey,
+        execution_id: &str,
+        question_id: &str,
+    ) -> Result<bool, SessionRuntimeError> {
+        let mut after_event_id = 0;
+        let mut pending = false;
+        loop {
+            let events = self
+                .store
+                .list_events_after(thread_key, after_event_id, Some(execution_id), 1000)
+                .await?;
+            if events.is_empty() {
+                break;
+            }
+            for event in &events {
+                after_event_id = event.event_id;
+                if output_line_question_event_matches(event, question_id, "question_requested") {
+                    pending = true;
+                } else if output_line_question_event_matches(
+                    event,
+                    question_id,
+                    "question_resolved",
+                ) || event_question_id_matches(
+                    event,
+                    question_id,
+                    "session.question_answer_delivered",
+                ) {
+                    pending = false;
+                }
+            }
+        }
+        Ok(pending)
     }
 
     async fn stop_session_sandbox_for_cancel(
@@ -3494,6 +3624,33 @@ async fn append_output_line(
     Ok(())
 }
 
+fn output_line_question_event_matches(
+    event: &SessionEvent,
+    question_id: &str,
+    expected_type: &str,
+) -> bool {
+    if event.event_type != SESSION_OUTPUT_LINE_EVENT {
+        return false;
+    }
+    let Some(line) = event.payload.as_str() else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<Value>(line) else {
+        return false;
+    };
+    value.get("type").and_then(Value::as_str) == Some(expected_type)
+        && value.get("question_id").and_then(Value::as_str) == Some(question_id)
+}
+
+fn event_question_id_matches(
+    event: &SessionEvent,
+    question_id: &str,
+    expected_event_type: &str,
+) -> bool {
+    event.event_type == expected_event_type
+        && event.payload.get("question_id").and_then(Value::as_str) == Some(question_id)
+}
+
 fn redact_sensitive_text(input: &str) -> String {
     let bearer_redacted = redact_bearer_tokens(input);
     let env_redacted = redact_sensitive_env_assignments(&bearer_redacted);
@@ -3794,6 +3951,63 @@ mod tests {
             stdout_pump_error_message(&LinesCodecError::MaxLineLengthExceeded),
             "sandbox stdout line exceeded maximum length of 8388608 bytes"
         );
+    }
+
+    #[test]
+    fn output_line_question_event_match_requires_output_line_type_and_question_id() {
+        let event = session_event(
+            1,
+            SESSION_OUTPUT_LINE_EVENT,
+            Value::String(
+                json!({
+                    "type": "question_requested",
+                    "question_id": "q-1",
+                })
+                .to_string(),
+            ),
+        );
+        assert!(output_line_question_event_matches(
+            &event,
+            "q-1",
+            "question_requested"
+        ));
+        assert!(!output_line_question_event_matches(
+            &event,
+            "q-2",
+            "question_requested"
+        ));
+        assert!(!output_line_question_event_matches(
+            &event,
+            "q-1",
+            "question_resolved"
+        ));
+
+        let canonical_event = session_event(
+            2,
+            "question_requested",
+            json!({"type": "question_requested", "question_id": "q-1"}),
+        );
+        assert!(!output_line_question_event_matches(
+            &canonical_event,
+            "q-1",
+            "question_requested"
+        ));
+
+        let delivered_event = session_event(
+            3,
+            "session.question_answer_delivered",
+            json!({"question_id": "q-1"}),
+        );
+        assert!(event_question_id_matches(
+            &delivered_event,
+            "q-1",
+            "session.question_answer_delivered"
+        ));
+        assert!(!event_question_id_matches(
+            &delivered_event,
+            "q-2",
+            "session.question_answer_delivered"
+        ));
     }
 
     #[test]
@@ -4582,6 +4796,19 @@ mod tests {
         }
     }
 
+    fn session_event(event_id: i64, event_type: &str, payload: Value) -> SessionEvent {
+        let thread_key = ThreadKey::parse("cli:test-idle").unwrap();
+        let now = OffsetDateTime::now_utc();
+        SessionEvent {
+            event_id,
+            thread_key,
+            execution_id: Some("exe-1".to_owned()),
+            event_type: event_type.to_owned(),
+            payload,
+            created_at: now,
+        }
+    }
+
     fn env_value<'a>(spec: &'a SandboxSpec, name: &str) -> Option<&'a str> {
         spec.env
             .iter()
@@ -4600,7 +4827,7 @@ mod adoption_tests {
     use centaur_sandbox_core::{ObservedSandbox, SandboxHandle, SandboxIo, SandboxResult};
     use centaur_session_core::SessionStatus;
     use tokio::{
-        io::{AsyncWriteExt, DuplexStream},
+        io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream},
         sync::Barrier,
     };
 
@@ -5064,6 +5291,107 @@ mod adoption_tests {
                 .any(|event| event.event_type == "session.execution_cancelled"),
             "expected a cancellation event"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn answers_pending_question_by_writing_active_execution_stdin() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:answer-question-{}", uuid::Uuid::new_v4())).unwrap();
+        let execution_id = orphaned_execution(&store, &thread_key, Some("sbx-answer"), true).await;
+        store
+            .append_event(
+                &thread_key,
+                Some(&execution_id),
+                SESSION_OUTPUT_LINE_EVENT,
+                Value::String(
+                    json!({
+                        "type": "question_requested",
+                        "question_id": "q-1",
+                        "turn_id": "turn-1",
+                        "questions": [],
+                    })
+                    .to_string(),
+                ),
+            )
+            .await
+            .expect("append question event");
+
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let (io, _stdout, stdin) = mock_io();
+        backend.push_io(io).await;
+        let runtime = runtime_with(&store, backend.clone());
+        let outcome = runtime
+            .answer_execution_question(
+                &thread_key,
+                &execution_id,
+                "q-1",
+                json!({"choice": {"answers": ["A"]}}),
+            )
+            .await
+            .expect("answer question");
+
+        assert_eq!(outcome.execution_id, execution_id);
+        assert_eq!(outcome.thread_key, thread_key);
+        assert_eq!(outcome.status, "answered");
+        assert_eq!(backend.opens(), 1);
+
+        let mut reader = BufReader::new(stdin);
+        let mut delivered = String::new();
+        reader
+            .read_line(&mut delivered)
+            .await
+            .expect("read delivered answer");
+        let delivered: Value = serde_json::from_str(delivered.trim()).expect("answer json");
+        assert_eq!(delivered["type"], "question_answer");
+        assert_eq!(delivered["question_id"], "q-1");
+        assert_eq!(delivered["answers"]["choice"]["answers"][0], "A");
+
+        let all = events(&store, &thread_key).await;
+        assert!(
+            all.iter()
+                .any(|event| event.event_type == "session.question_answer_delivered"),
+            "expected answer delivery event"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rejects_stale_question_answer_before_opening_sandbox_io() {
+        let Some(store) = test_store().await else {
+            return;
+        };
+        let _serial = TEST_LOCK.lock().await;
+        let thread_key =
+            ThreadKey::parse(format!("test:answer-stale-{}", uuid::Uuid::new_v4())).unwrap();
+        let execution_id = orphaned_execution(&store, &thread_key, Some("sbx-stale"), true).await;
+        for line in [
+            json!({"type": "question_requested", "question_id": "q-1"}).to_string(),
+            json!({"type": "question_resolved", "question_id": "q-1", "reason": "empty"})
+                .to_string(),
+        ] {
+            store
+                .append_event(
+                    &thread_key,
+                    Some(&execution_id),
+                    SESSION_OUTPUT_LINE_EVENT,
+                    Value::String(line),
+                )
+                .await
+                .expect("append question event");
+        }
+
+        let backend = Arc::new(MockBackend::new(SandboxStatus::Running, Vec::new()));
+        let runtime = runtime_with(&store, backend.clone());
+        let error = runtime
+            .answer_execution_question(&thread_key, &execution_id, "q-1", json!({}))
+            .await
+            .expect_err("stale question should be rejected");
+
+        assert!(matches!(error, AnswerQuestionError::QuestionNotPending));
+        assert_eq!(backend.opens(), 0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
