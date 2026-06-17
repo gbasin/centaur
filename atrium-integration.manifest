@@ -14,7 +14,8 @@ base = origin/main
 # branch                              intent            pr     purpose
 fork/gb/atrium-fork-meta              fork-permanent    never  ATRIUM_FORK.md + manifest + rebuild script (so a rebuild restores its own tooling)
 fork/gb/api-rs-hitl-relay             upstream-pending  #616   api-rs session cancel + HITL question-answer relay (carries the cancel topic)
-fork/gb/api-rs-artifact-capture       undecided         -      sandbox artifact capture (api-rs routes + sandbox worker)
+fork/gb/api-rs-artifact-capture       fork-permanent    never  sandbox artifact capture (api-rs routes + sandbox worker); carried, not upstreamed
 
-# fork-permanent topics (Atrium-only; uncomment once the branch exists):
-# fork/gb/atrium-local-config         fork-permanent    never  iron-proxy disable + workflow-worker off (local-dev runtime)
+# Deploy-time config (iron-proxy disable, warm-pool size, etc.) is NOT a fork
+# topic — it lives in Atrium's infra/values.local.yaml, applied via
+# CENTAUR_EXTRA_VALUES at `just deploy`.
