@@ -882,6 +882,9 @@ impl SandboxArgs {
                 .unwrap_or("http://api:8000")
                 .to_owned(),
         )];
+        if let Some(api_key) = artifact_capture_api_key_from_env() {
+            envs.push(("CENTAUR_API_KEY".to_owned(), api_key));
+        }
 
         // Single source of truth: propagate this control plane's harness auth
         // modes into the sandbox so the agent's auth.json matches the
@@ -1705,6 +1708,17 @@ fn default_workflow_host_path() -> String {
         .join("workflow_host.py")
         .to_string_lossy()
         .to_string()
+}
+
+fn artifact_capture_api_key_from_env() -> Option<String> {
+    [
+        "ARTIFACT_CAPTURE_API_KEY",
+        "CENTAUR_API_KEY",
+        "SLACKBOT_API_KEY",
+        "DISCORDBOT_API_KEY",
+    ]
+    .into_iter()
+    .find_map(|name| clean_optional_value(env::var(name).ok().as_deref()))
 }
 
 fn harness_fragment_engine_name(engine: &HarnessType) -> &'static str {
