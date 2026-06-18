@@ -519,6 +519,7 @@ impl PgSessionStore {
         let artifact_ref = input.data.as_ref().map(|_| input.sha256.clone());
         let payload = serde_json::json!({
             "artifact_id": artifact_id,
+            "execution_id": execution_id,
             "path": input.path,
             "kind": input.kind,
             "mime": input.mime,
