@@ -40,9 +40,17 @@ origin/main
 3. **Keep fork-only changes additive / flag-gated** where possible. Additive
    changes rebase cleanly across upstream churn; invasive edits cost you on
    every sync.
-4. **Migrations:** every topic numbers from `origin/main`'s latest. Two topics
-   can independently claim the same number — reconcile at integration time
-   (renumber the later one; the migration-ordering CI check enforces this).
+4. **Migrations:** paradigm (`origin`) uses sequential 4-digit versions
+   (`0001`, `0002`, …). **Fork-permanent migrations MUST use the reserved
+   `1000+` range** (e.g. `1000_artifact_blobs.sql`) so they always sort after
+   paradigm's and never collide as upstream grows — a sequential fork migration
+   gets steamrolled the moment paradigm ships a migration at that number (this
+   bit us three times). `1000+` migrations only depend on early upstream tables
+   (e.g. `session_executions`), so applying them last is fine. Upstream-pending
+   topics still number sequentially from `origin/main`'s latest (they're going
+   into paradigm's sequence). NOTE: renumbering a migration that a live DB has
+   already applied requires reconciling that DB's `_sqlx_migrations` before the
+   next deploy.
 5. **`git rerere` is enabled** — your conflict resolutions are recorded and
    replayed on the next rebuild. Resolve carefully once.
 
