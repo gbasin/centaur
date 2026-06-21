@@ -47,15 +47,20 @@ impl QuiesceGate for LeaseGate {
     }
 }
 
+/// A pending write: (path, seq, bytes).
+pub type PendingWrite = (String, u64, Vec<u8>);
+/// A landed write: (path, seq).
+pub type AdoptedWrite = (String, u64);
+
 /// Apply the inbound write plan, honoring the gate: write the quiesced paths now,
 /// defer the busy ones (the next sweep retries — a state-diff, never event-dropped).
 /// `write` performs the atomic write-through-`merged` (+ chown to the agent); it
 /// returns Ok on success. Returns (written, deferred).
 pub fn apply_quiesced_writes<W>(
-    writes: Vec<(String, u64, Vec<u8>)>,
+    writes: Vec<PendingWrite>,
     gate: &dyn QuiesceGate,
     mut write: W,
-) -> (Vec<(String, u64)>, Vec<(String, u64, Vec<u8>)>)
+) -> (Vec<AdoptedWrite>, Vec<PendingWrite>)
 where
     W: FnMut(&str, &[u8]) -> Result<(), String>,
 {
@@ -80,15 +85,17 @@ where
 #[cfg(target_os = "linux")]
 pub fn path_is_open(abs_path: &str) -> bool {
     use std::fs;
-    let Ok(procs) = fs::read_dir("/proc") else { return true };
+    let Ok(procs) = fs::read_dir("/proc") else {
+        return true;
+    };
     for p in procs.flatten() {
         let fd_dir = p.path().join("fd");
-        let Ok(fds) = fs::read_dir(&fd_dir) else { continue };
+        let Ok(fds) = fs::read_dir(&fd_dir) else {
+            continue;
+        };
         for fd in fds.flatten() {
-            if let Ok(target) = fs::read_link(fd.path()) {
-                if target.to_string_lossy() == abs_path {
-                    return true;
-                }
+            if fs::read_link(fd.path()).is_ok_and(|t| t.to_string_lossy() == abs_path) {
+                return true;
             }
         }
     }

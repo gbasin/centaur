@@ -5,9 +5,9 @@
 //! openat2 reads, write-through-`merged`) plugs the real impls in on the node.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use crate::adopt::{decide_adopt, AdoptAction, LocalState, RemoteChange, RemoteStatus};
+use crate::adopt::{AdoptAction, LocalState, RemoteChange, RemoteStatus, decide_adopt};
 use crate::echo::EchoGuard;
 use crate::overlay::{OverlayOp, RawEntry};
 use crate::scan_to_ops;
@@ -43,7 +43,7 @@ pub fn status_of(s: &str) -> RemoteStatus {
 /// Read the current bytes of an upper path (the live impl is openat2-hardened +
 /// torn-read; tests inject a map).
 pub trait UpperReader {
-    fn read(&self, path: &PathBuf) -> Option<Vec<u8>>;
+    fn read(&self, path: &Path) -> Option<Vec<u8>>;
 }
 
 pub fn sha_hex(bytes: &[u8]) -> String {
@@ -141,8 +141,14 @@ pub fn wip_sweep(
     // the base HEAD sha (so recovery knows what to clone), the tracked diff, and
     // each untracked file — each a normal artifact under wip/<repo>/.
     let mut items: Vec<(String, Vec<u8>)> = vec![
-        (format!("wip/{repo_name}/HEAD"), patch.base_head_sha.clone().into_bytes()),
-        (format!("wip/{repo_name}/patch.diff"), patch.diff.clone().into_bytes()),
+        (
+            format!("wip/{repo_name}/HEAD"),
+            patch.base_head_sha.clone().into_bytes(),
+        ),
+        (
+            format!("wip/{repo_name}/patch.diff"),
+            patch.diff.clone().into_bytes(),
+        ),
     ];
     for (rel, bytes) in &patch.untracked {
         items.push((format!("wip/{repo_name}/untracked/{rel}"), bytes.clone()));
@@ -181,7 +187,11 @@ pub fn hydrate_lower(
     client: &mut dyn AtriumClient,
     mut write_file: impl FnMut(&str, &[u8]) -> Result<(), String>,
 ) -> HydrateOutcome {
-    let mut out = HydrateOutcome { base_seqs: HashMap::new(), bytes_written: 0, errors: vec![] };
+    let mut out = HydrateOutcome {
+        base_seqs: HashMap::new(),
+        bytes_written: 0,
+        errors: vec![],
+    };
     for entry in manifest {
         match client.fetch_bytes(&entry.path, entry.seq) {
             Ok(bytes) => match write_file(&entry.path, &bytes) {
@@ -217,8 +227,18 @@ pub fn inbound_sweep(
     echo: &mut EchoGuard,
     client: &mut dyn AtriumClient,
 ) -> InboundPlan {
-    let mut plan = InboundPlan { to_write: vec![], to_reconcile: vec![], conflicts: vec![], skipped: vec![] };
-    let default = LocalState { base_seq: 0, base_sha: None, upper_sha: None, applied_remote_seq: None };
+    let mut plan = InboundPlan {
+        to_write: vec![],
+        to_reconcile: vec![],
+        conflicts: vec![],
+        skipped: vec![],
+    };
+    let default = LocalState {
+        base_seq: 0,
+        base_sha: None,
+        upper_sha: None,
+        applied_remote_seq: None,
+    };
     for (path, remote) in changes {
         let local = locals.get(path).unwrap_or(&default);
         match decide_adopt(local, remote) {
@@ -234,7 +254,9 @@ pub fn inbound_sweep(
                 }
                 Err(_) => plan.skipped.push(path.clone()),
             },
-            AdoptAction::ReconcileViaWriteback { base_seq } => plan.to_reconcile.push((path.clone(), base_seq)),
+            AdoptAction::ReconcileViaWriteback { base_seq } => {
+                plan.to_reconcile.push((path.clone(), base_seq))
+            }
             AdoptAction::SurfaceConflict { seq } => plan.conflicts.push((path.clone(), seq)),
             AdoptAction::Skip(_) => plan.skipped.push(path.clone()),
         }
@@ -250,7 +272,7 @@ mod tests {
 
     struct MapReader(HashMap<PathBuf, Vec<u8>>);
     impl UpperReader for MapReader {
-        fn read(&self, path: &PathBuf) -> Option<Vec<u8>> {
+        fn read(&self, path: &Path) -> Option<Vec<u8>> {
             self.0.get(path).cloned()
         }
     }
@@ -276,10 +298,22 @@ mod tests {
     }
 
     fn reg(p: &str) -> RawEntry {
-        RawEntry { rel_path: PathBuf::from(p), file_type: RawFileType::Regular, rdev: 0, size: 4, xattrs: vec![] }
+        RawEntry {
+            rel_path: PathBuf::from(p),
+            file_type: RawFileType::Regular,
+            rdev: 0,
+            size: 4,
+            xattrs: vec![],
+        }
     }
     fn whiteout(p: &str) -> RawEntry {
-        RawEntry { rel_path: PathBuf::from(p), file_type: RawFileType::CharDevice, rdev: 0, size: 0, xattrs: vec![] }
+        RawEntry {
+            rel_path: PathBuf::from(p),
+            file_type: RawFileType::CharDevice,
+            rdev: 0,
+            size: 0,
+            xattrs: vec![],
+        }
     }
 
     #[test]
@@ -317,8 +351,14 @@ mod tests {
     #[test]
     fn hydrate_lower_materializes_files_and_returns_base_seqs() {
         let manifest = vec![
-            HydrateEntry { path: "proj-x/plan.md".into(), seq: 5 },
-            HydrateEntry { path: "shared/notes.md".into(), seq: 2 },
+            HydrateEntry {
+                path: "proj-x/plan.md".into(),
+                seq: 5,
+            },
+            HydrateEntry {
+                path: "shared/notes.md".into(),
+                seq: 2,
+            },
         ];
         let mut client = FakeClient::default();
         let mut written: HashMap<String, Vec<u8>> = HashMap::new();
@@ -336,12 +376,22 @@ mod tests {
     #[test]
     fn hydrate_lower_records_write_errors_without_aborting() {
         let manifest = vec![
-            HydrateEntry { path: "ok.md".into(), seq: 1 },
-            HydrateEntry { path: "bad.md".into(), seq: 1 },
+            HydrateEntry {
+                path: "ok.md".into(),
+                seq: 1,
+            },
+            HydrateEntry {
+                path: "bad.md".into(),
+                seq: 1,
+            },
         ];
         let mut client = FakeClient::default();
         let out = hydrate_lower(&manifest, &mut client, |path, _bytes| {
-            if path == "bad.md" { Err("disk full".into()) } else { Ok(()) }
+            if path == "bad.md" {
+                Err("disk full".into())
+            } else {
+                Ok(())
+            }
         });
         assert_eq!(out.base_seqs.len(), 1); // only ok.md hydrated
         assert_eq!(out.errors.len(), 1);
@@ -366,7 +416,11 @@ mod tests {
 
     #[test]
     fn wip_sweep_skips_an_empty_patch() {
-        let patch = crate::wip::WipPatch { base_head_sha: "x".into(), diff: String::new(), untracked: vec![] };
+        let patch = crate::wip::WipPatch {
+            base_head_sha: "x".into(),
+            diff: String::new(),
+            untracked: vec![],
+        };
         let mut client = FakeClient::default();
         assert!(wip_sweep("r", &patch, &HashMap::new(), &mut client).is_empty());
     }
@@ -374,12 +428,42 @@ mod tests {
     #[test]
     fn inbound_sweep_fetches_for_adopt_and_routes_edited_to_reconcile() {
         let changes = vec![
-            ("unedited.md".to_string(), RemoteChange { seq: 6, sha: Some("v6".into()), status: RemoteStatus::Normal }),
-            ("edited.md".to_string(), RemoteChange { seq: 6, sha: Some("v6".into()), status: RemoteStatus::Normal }),
+            (
+                "unedited.md".to_string(),
+                RemoteChange {
+                    seq: 6,
+                    sha: Some("v6".into()),
+                    status: RemoteStatus::Normal,
+                },
+            ),
+            (
+                "edited.md".to_string(),
+                RemoteChange {
+                    seq: 6,
+                    sha: Some("v6".into()),
+                    status: RemoteStatus::Normal,
+                },
+            ),
         ];
         let mut locals = HashMap::new();
-        locals.insert("unedited.md".to_string(), LocalState { base_seq: 5, base_sha: Some("b".into()), upper_sha: None, applied_remote_seq: None });
-        locals.insert("edited.md".to_string(), LocalState { base_seq: 5, base_sha: Some("b".into()), upper_sha: Some("mine".into()), applied_remote_seq: None });
+        locals.insert(
+            "unedited.md".to_string(),
+            LocalState {
+                base_seq: 5,
+                base_sha: Some("b".into()),
+                upper_sha: None,
+                applied_remote_seq: None,
+            },
+        );
+        locals.insert(
+            "edited.md".to_string(),
+            LocalState {
+                base_seq: 5,
+                base_sha: Some("b".into()),
+                upper_sha: Some("mine".into()),
+                applied_remote_seq: None,
+            },
+        );
         let mut echo = EchoGuard::new();
         let mut client = FakeClient::default();
 

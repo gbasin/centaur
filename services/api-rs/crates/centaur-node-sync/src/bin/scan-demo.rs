@@ -7,7 +7,7 @@
 
 #[cfg(target_os = "linux")]
 fn main() {
-    use centaur_node_sync::{scan_to_ops, fs_linux};
+    use centaur_node_sync::{fs_linux, scan_to_ops};
     use std::path::Path;
 
     let args: Vec<String> = std::env::args().collect();
@@ -34,7 +34,10 @@ fn main() {
         .iter()
         .map(|op| format!("{op:?}").replace('"', "'"))
         .collect();
-    let skipped_json: Vec<String> = skipped.iter().map(|(p, r)| format!("{p:?}:{r:?}")).collect();
+    let skipped_json: Vec<String> = skipped
+        .iter()
+        .map(|(p, r)| format!("{p:?}:{r:?}"))
+        .collect();
     println!("OPS[{}]", ops.len());
     for o in &ops_json {
         println!("  {o}");

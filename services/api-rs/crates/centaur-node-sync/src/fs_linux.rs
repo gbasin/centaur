@@ -11,12 +11,12 @@ use std::fs;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
-use std::os::unix::io::{AsRawFd, OwnedFd, FromRawFd};
+use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::Path;
 
 use crate::overlay::{RawEntry, RawFileType, XATTR_METACOPY, XATTR_OPAQUE, XATTR_REDIRECT};
-use crate::safety::{is_safe_relpath, HARDENED_RESOLVE};
-use crate::tornread::{read_stable, FileIdentity, TornReadError};
+use crate::safety::{HARDENED_RESOLVE, is_safe_relpath};
+use crate::tornread::{FileIdentity, TornReadError, read_stable};
 
 /// Recursively read every entry under `upper_root` into `RawEntry`s (relative
 /// paths). Directories are descended; symlinks are NEVER followed (recorded as
@@ -86,7 +86,10 @@ struct OpenHow {
 /// defense against `proj-x/leak -> /etc/shadow`.
 pub fn open_hardened(dir: &Path, rel_path: &Path) -> io::Result<OwnedFd> {
     if !is_safe_relpath(rel_path) {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "unsafe relpath"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "unsafe relpath",
+        ));
     }
     let dirfd = open_dir(dir)?;
     let c_rel = CString::new(rel_path.as_os_str().as_bytes())
@@ -115,7 +118,12 @@ pub fn open_hardened(dir: &Path, rel_path: &Path) -> io::Result<OwnedFd> {
 fn open_dir(dir: &Path) -> io::Result<OwnedFd> {
     let c = CString::new(dir.as_os_str().as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "nul in path"))?;
-    let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC) };
+    let fd = unsafe {
+        libc::open(
+            c.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
     if fd < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -132,17 +140,22 @@ pub fn read_file_safe(dir: &Path, rel_path: &Path, max_retries: u32) -> io::Resu
         let meta = fs::File::from(fd)
             .metadata()
             .map_err(|e| TornReadError::Io(e.to_string()))?;
-        Ok(FileIdentity { size: meta.size(), mtime_ns: meta.mtime_nsec() as i128 + (meta.mtime() as i128) * 1_000_000_000, ino: meta.ino() })
+        Ok(FileIdentity {
+            size: meta.size(),
+            mtime_ns: meta.mtime_nsec() as i128 + (meta.mtime() as i128) * 1_000_000_000,
+            ino: meta.ino(),
+        })
     };
     let read = || -> Result<Vec<u8>, TornReadError> {
         let fd = open_hardened(dir, rel_path).map_err(|e| TornReadError::Io(e.to_string()))?;
         let mut f = fs::File::from(fd);
         let mut buf = Vec::new();
-        f.read_to_end(&mut buf).map_err(|e| TornReadError::Io(e.to_string()))?;
+        f.read_to_end(&mut buf)
+            .map_err(|e| TornReadError::Io(e.to_string()))?;
         Ok(buf)
     };
     read_stable(max_retries, identity, read).map_err(|e| match e {
-        TornReadError::ChangedTooManyTimes => io::Error::new(io::ErrorKind::Other, "file never settled"),
-        TornReadError::Io(s) => io::Error::new(io::ErrorKind::Other, s),
+        TornReadError::ChangedTooManyTimes => io::Error::other("file never settled"),
+        TornReadError::Io(s) => io::Error::other(s),
     })
 }

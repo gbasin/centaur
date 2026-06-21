@@ -4,7 +4,7 @@
 //! synchronous per session.
 
 use crate::adopt::RemoteChange;
-use crate::runtime::{status_of, AtriumClient};
+use crate::runtime::{AtriumClient, status_of};
 
 pub struct HttpAtriumClient {
     base_url: String,
@@ -14,7 +14,11 @@ pub struct HttpAtriumClient {
 }
 
 impl HttpAtriumClient {
-    pub fn new(base_url: impl Into<String>, api_key: impl Into<String>, session_id: impl Into<String>) -> Self {
+    pub fn new(
+        base_url: impl Into<String>,
+        api_key: impl Into<String>,
+        session_id: impl Into<String>,
+    ) -> Self {
         Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             api_key: api_key.into(),
@@ -26,7 +30,10 @@ impl HttpAtriumClient {
     }
 
     fn url(&self, suffix: &str) -> String {
-        format!("{}/api/internal/sessions/{}{}", self.base_url, self.session_id, suffix)
+        format!(
+            "{}/api/internal/sessions/{}{}",
+            self.base_url, self.session_id, suffix
+        )
     }
 }
 
@@ -34,7 +41,9 @@ fn enc(s: &str) -> String {
     // minimal percent-encoding for a path query value
     s.bytes()
         .map(|b| match b {
-            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'/' => (b as char).to_string(),
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'/' => {
+                (b as char).to_string()
+            }
             _ => format!("%{b:02X}"),
         })
         .collect()
@@ -50,9 +59,13 @@ impl AtriumClient for HttpAtriumClient {
         if base_seq > 0 {
             req = req.set("x-artifact-base-seq", &base_seq.to_string());
         }
-        let resp = req.send_bytes(bytes).map_err(|e| format!("capture {path}: {e}"))?;
+        let resp = req
+            .send_bytes(bytes)
+            .map_err(|e| format!("capture {path}: {e}"))?;
         let v: serde_json::Value = resp.into_json().map_err(|e| e.to_string())?;
-        v.get("seq").and_then(|s| s.as_u64()).ok_or_else(|| "no seq in capture response".to_string())
+        v.get("seq")
+            .and_then(|s| s.as_u64())
+            .ok_or_else(|| "no seq in capture response".to_string())
     }
 
     fn post_delete(&mut self, path: &str, base_seq: u64) -> Result<u64, String> {
@@ -64,9 +77,13 @@ impl AtriumClient for HttpAtriumClient {
         if base_seq > 0 {
             req = req.set("x-artifact-base-seq", &base_seq.to_string());
         }
-        let resp = req.send_bytes(&[]).map_err(|e| format!("delete {path}: {e}"))?;
+        let resp = req
+            .send_bytes(&[])
+            .map_err(|e| format!("delete {path}: {e}"))?;
         let v: serde_json::Value = resp.into_json().map_err(|e| e.to_string())?;
-        v.get("seq").and_then(|s| s.as_u64()).ok_or_else(|| "no seq in delete response".to_string())
+        v.get("seq")
+            .and_then(|s| s.as_u64())
+            .ok_or_else(|| "no seq in delete response".to_string())
     }
 
     fn fetch_bytes(&mut self, path: &str, seq: u64) -> Result<Vec<u8>, String> {
@@ -81,7 +98,10 @@ impl AtriumClient for HttpAtriumClient {
         Ok(buf)
     }
 
-    fn poll_changes(&mut self, cursor: &str) -> Result<(Vec<(String, RemoteChange)>, String), String> {
+    fn poll_changes(
+        &mut self,
+        cursor: &str,
+    ) -> Result<(Vec<(String, RemoteChange)>, String), String> {
         // The change-feed lives at the public session route (the node is allowed to
         // read it via the same api-key gate exposed on the internal mirror).
         let resp = self
@@ -91,14 +111,29 @@ impl AtriumClient for HttpAtriumClient {
             .call()
             .map_err(|e| format!("poll {cursor}: {e}"))?;
         let v: serde_json::Value = resp.into_json().map_err(|e| e.to_string())?;
-        let next = v.get("next_cursor").and_then(|c| c.as_str()).unwrap_or(cursor).to_string();
+        let next = v
+            .get("next_cursor")
+            .and_then(|c| c.as_str())
+            .unwrap_or(cursor)
+            .to_string();
         let mut out = Vec::new();
         if let Some(rows) = v.get("rows").and_then(|r| r.as_array()) {
             for row in rows {
-                let path = row.get("path").and_then(|p| p.as_str()).unwrap_or_default().to_string();
+                let path = row
+                    .get("path")
+                    .and_then(|p| p.as_str())
+                    .unwrap_or_default()
+                    .to_string();
                 let seq = row.get("seq").and_then(|s| s.as_u64()).unwrap_or(0);
-                let sha = row.get("sha").and_then(|s| s.as_str()).map(|s| s.to_string());
-                let status = status_of(row.get("status").and_then(|s| s.as_str()).unwrap_or("normal"));
+                let sha = row
+                    .get("sha")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string());
+                let status = status_of(
+                    row.get("status")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("normal"),
+                );
                 out.push((path, RemoteChange { seq, sha, status }));
             }
         }

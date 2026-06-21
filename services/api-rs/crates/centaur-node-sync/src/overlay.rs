@@ -42,7 +42,10 @@ pub struct RawEntry {
 
 impl RawEntry {
     pub fn xattr(&self, name: &str) -> Option<&[u8]> {
-        self.xattrs.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_slice())
+        self.xattrs
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.as_slice())
     }
     /// Overlay sets the opaque xattr to the byte 'y'.
     pub fn is_opaque(&self) -> bool {
@@ -94,10 +97,16 @@ pub fn classify(entry: &RawEntry) -> OverlayOp {
         // Whiteout: the load-bearing delete signal. Only rdev 0 is a whiteout; a
         // real char device (rdev != 0) the agent mknod'd is not ours → skip.
         RawFileType::CharDevice if entry.rdev == WHITEOUT_RDEV => OverlayOp::Delete { path },
-        RawFileType::CharDevice => OverlayOp::Skip { path, reason: SkipReason::UnknownFileType },
+        RawFileType::CharDevice => OverlayOp::Skip {
+            path,
+            reason: SkipReason::UnknownFileType,
+        },
 
         // A symlink is NEVER followed; we record only that it exists + its length.
-        RawFileType::Symlink => OverlayOp::SymlinkMeta { path, target_len: entry.size },
+        RawFileType::Symlink => OverlayOp::SymlinkMeta {
+            path,
+            target_len: entry.size,
+        },
 
         RawFileType::Dir => {
             if let Some(from) = entry.redirect_target() {
@@ -113,13 +122,22 @@ pub fn classify(entry: &RawEntry) -> OverlayOp {
             if let Some(from) = entry.redirect_target() {
                 OverlayOp::Rename { from, to: path }
             } else if entry.is_metacopy_only() && entry.size == 0 {
-                OverlayOp::Skip { path, reason: SkipReason::MetacopyWithoutBytes }
+                OverlayOp::Skip {
+                    path,
+                    reason: SkipReason::MetacopyWithoutBytes,
+                }
             } else {
-                OverlayOp::Upsert { path, size: entry.size }
+                OverlayOp::Upsert {
+                    path,
+                    size: entry.size,
+                }
             }
         }
 
-        RawFileType::Other => OverlayOp::Skip { path, reason: SkipReason::UnknownFileType },
+        RawFileType::Other => OverlayOp::Skip {
+            path,
+            reason: SkipReason::UnknownFileType,
+        },
     }
 }
 
@@ -135,7 +153,10 @@ pub fn redirect_to_relpath(value: &[u8]) -> PathBuf {
         match comp {
             Component::Normal(c) => out.push(c),
             // never let a redirect value escape the root
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) | Component::CurDir => {}
+            Component::ParentDir
+            | Component::RootDir
+            | Component::Prefix(_)
+            | Component::CurDir => {}
         }
     }
     out
@@ -146,65 +167,117 @@ mod tests {
     use super::*;
 
     fn entry(p: &str, ft: RawFileType) -> RawEntry {
-        RawEntry { rel_path: PathBuf::from(p), file_type: ft, rdev: 0, size: 0, xattrs: vec![] }
+        RawEntry {
+            rel_path: PathBuf::from(p),
+            file_type: ft,
+            rdev: 0,
+            size: 0,
+            xattrs: vec![],
+        }
     }
 
     #[test]
     fn regular_file_is_upsert() {
         let mut e = entry("proj-x/plan.md", RawFileType::Regular);
         e.size = 42;
-        assert_eq!(classify(&e), OverlayOp::Upsert { path: "proj-x/plan.md".into(), size: 42 });
+        assert_eq!(
+            classify(&e),
+            OverlayOp::Upsert {
+                path: "proj-x/plan.md".into(),
+                size: 42
+            }
+        );
     }
 
     #[test]
     fn char_dev_rdev_zero_is_delete() {
         // makedev(0,0) whiteout
-        let e = RawEntry { rdev: WHITEOUT_RDEV, ..entry("proj-x/old.md", RawFileType::CharDevice) };
-        assert_eq!(classify(&e), OverlayOp::Delete { path: "proj-x/old.md".into() });
+        let e = RawEntry {
+            rdev: WHITEOUT_RDEV,
+            ..entry("proj-x/old.md", RawFileType::CharDevice)
+        };
+        assert_eq!(
+            classify(&e),
+            OverlayOp::Delete {
+                path: "proj-x/old.md".into()
+            }
+        );
     }
 
     #[test]
     fn real_char_dev_is_skipped_not_deleted() {
         // a real device node (rdev != 0) must NOT be misread as a delete
-        let e = RawEntry { rdev: 259, ..entry("dev/thing", RawFileType::CharDevice) };
+        let e = RawEntry {
+            rdev: 259,
+            ..entry("dev/thing", RawFileType::CharDevice)
+        };
         assert_eq!(
             classify(&e),
-            OverlayOp::Skip { path: "dev/thing".into(), reason: SkipReason::UnknownFileType },
+            OverlayOp::Skip {
+                path: "dev/thing".into(),
+                reason: SkipReason::UnknownFileType
+            },
         );
     }
 
     #[test]
     fn symlink_is_metadata_only_never_followed() {
-        let e = RawEntry { size: 11, ..entry("proj-x/leak", RawFileType::Symlink) };
-        assert_eq!(classify(&e), OverlayOp::SymlinkMeta { path: "proj-x/leak".into(), target_len: 11 });
+        let e = RawEntry {
+            size: 11,
+            ..entry("proj-x/leak", RawFileType::Symlink)
+        };
+        assert_eq!(
+            classify(&e),
+            OverlayOp::SymlinkMeta {
+                path: "proj-x/leak".into(),
+                target_len: 11
+            }
+        );
     }
 
     #[test]
     fn opaque_dir_detected() {
         let mut e = entry("proj-x/sub", RawFileType::Dir);
         e.xattrs.push((XATTR_OPAQUE.into(), b"y".to_vec()));
-        assert_eq!(classify(&e), OverlayOp::OpaqueDir { path: "proj-x/sub".into() });
+        assert_eq!(
+            classify(&e),
+            OverlayOp::OpaqueDir {
+                path: "proj-x/sub".into()
+            }
+        );
     }
 
     #[test]
     fn plain_dir_is_structural() {
         let e = entry("proj-x/sub", RawFileType::Dir);
-        assert_eq!(classify(&e), OverlayOp::Dir { path: "proj-x/sub".into() });
+        assert_eq!(
+            classify(&e),
+            OverlayOp::Dir {
+                path: "proj-x/sub".into()
+            }
+        );
     }
 
     #[test]
     fn redirect_xattr_is_rename() {
         let mut e = entry("proj-x/new.md", RawFileType::Regular);
-        e.xattrs.push((XATTR_REDIRECT.into(), b"/proj-x/old.md".to_vec()));
+        e.xattrs
+            .push((XATTR_REDIRECT.into(), b"/proj-x/old.md".to_vec()));
         assert_eq!(
             classify(&e),
-            OverlayOp::Rename { from: "proj-x/old.md".into(), to: "proj-x/new.md".into() },
+            OverlayOp::Rename {
+                from: "proj-x/old.md".into(),
+                to: "proj-x/new.md".into()
+            },
         );
     }
 
     #[test]
     fn redirect_value_cannot_escape_root() {
-        assert_eq!(redirect_to_relpath(b"/../../etc/shadow"), PathBuf::from("etc/shadow"));
+        assert_eq!(
+            redirect_to_relpath(b"/../../etc/shadow"),
+            PathBuf::from("etc/shadow")
+        );
         assert_eq!(redirect_to_relpath(b"a/../../b"), PathBuf::from("a/b"));
     }
 
@@ -215,7 +288,10 @@ mod tests {
         e.xattrs.push((XATTR_METACOPY.into(), b"y".to_vec()));
         assert_eq!(
             classify(&e),
-            OverlayOp::Skip { path: "proj-x/big.bin".into(), reason: SkipReason::MetacopyWithoutBytes },
+            OverlayOp::Skip {
+                path: "proj-x/big.bin".into(),
+                reason: SkipReason::MetacopyWithoutBytes
+            },
         );
     }
 }

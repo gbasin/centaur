@@ -35,7 +35,11 @@ fn git(repo: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
         .output()
         .map_err(|e| format!("spawn git: {e}"))?;
     if !out.status.success() {
-        return Err(format!("git {:?} failed: {}", args, String::from_utf8_lossy(&out.stderr)));
+        return Err(format!(
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        ));
     }
     Ok(out.stdout)
 }
@@ -58,7 +62,11 @@ pub fn capture_wip(repo: &Path) -> Result<WipPatch, String> {
             untracked.push((rel, bytes));
         }
     }
-    Ok(WipPatch { base_head_sha, diff, untracked })
+    Ok(WipPatch {
+        base_head_sha,
+        diff,
+        untracked,
+    })
 }
 
 #[cfg(test)]
@@ -68,7 +76,14 @@ mod tests {
     use std::process::Command;
 
     fn sh(repo: &Path, args: &[&str]) {
-        let ok = Command::new("git").arg("-C").arg(repo).args(args).output().unwrap().status.success();
+        let ok = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .output()
+            .unwrap()
+            .status
+            .success();
         assert!(ok, "git {args:?}");
     }
 
@@ -104,13 +119,21 @@ mod tests {
         let refs_after = git(&repo, &["show-ref"]).unwrap_or_default();
 
         assert_eq!(wip.base_head_sha.len(), 40);
-        assert!(wip.diff.contains("WIP edit"), "diff carries the tracked change");
         assert!(
-            wip.untracked.iter().any(|(p, b)| p == "scratch.txt" && b == b"brand new\n"),
+            wip.diff.contains("WIP edit"),
+            "diff carries the tracked change"
+        );
+        assert!(
+            wip.untracked
+                .iter()
+                .any(|(p, b)| p == "scratch.txt" && b == b"brand new\n"),
             "untracked file captured with bytes",
         );
         // the key invariant: capture created NO refs/objects the fleet can see.
-        assert_eq!(refs_before, refs_after, "capture_wip must not write any git ref");
+        assert_eq!(
+            refs_before, refs_after,
+            "capture_wip must not write any git ref"
+        );
 
         let _ = fs::remove_dir_all(&repo);
     }

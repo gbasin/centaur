@@ -18,8 +18,10 @@ fn main() {
     use centaur_node_sync::echo::EchoGuard;
     use centaur_node_sync::fs_linux;
     use centaur_node_sync::http_client::HttpAtriumClient;
-    use centaur_node_sync::quiesce::{apply_quiesced_writes, LeaseGate};
-    use centaur_node_sync::runtime::{capture_sweep, inbound_sweep, sha_hex, AtriumClient, UpperReader};
+    use centaur_node_sync::quiesce::{LeaseGate, apply_quiesced_writes};
+    use centaur_node_sync::runtime::{
+        AtriumClient, UpperReader, capture_sweep, inbound_sweep, sha_hex,
+    };
     use centaur_node_sync::state::DaemonState;
     use std::path::{Path, PathBuf};
 
@@ -45,7 +47,9 @@ fn main() {
     // Per-session upper dirty-byte budget (#11). Default 2 GiB; the harness pauses
     // the agent before ENOSPC when crossed.
     let budget = centaur_node_sync::backpressure::Budget {
-        max_dirty_bytes: env("NODE_SYNC_DIRTY_BUDGET").parse::<u64>().unwrap_or(2 * 1024 * 1024 * 1024),
+        max_dirty_bytes: env("NODE_SYNC_DIRTY_BUDGET")
+            .parse::<u64>()
+            .unwrap_or(2 * 1024 * 1024 * 1024),
     };
     let state_file = {
         let s = env("NODE_SYNC_STATE");
@@ -64,7 +68,7 @@ fn main() {
         upper: PathBuf,
     }
     impl UpperReader for HardenedReader {
-        fn read(&self, rel: &PathBuf) -> Option<Vec<u8>> {
+        fn read(&self, rel: &std::path::Path) -> Option<Vec<u8>> {
             fs_linux::read_file_safe(&self.upper, rel, 3).ok()
         }
     }
@@ -115,7 +119,11 @@ fn main() {
         }
         state.hydrated = true;
         let _ = state.save(&state_file);
-        println!("hydrated {} paths, cursor={}", state.paths.len(), state.cursor);
+        println!(
+            "hydrated {} paths, cursor={}",
+            state.paths.len(),
+            state.cursor
+        );
     }
 
     loop {
@@ -125,7 +133,9 @@ fn main() {
         // work. A file absent from the upper = not copied-up = unedited (resolves to
         // the lower/base), so upper_sha := base_sha there.
         {
-            let reader = HardenedReader { upper: upper.clone() };
+            let reader = HardenedReader {
+                upper: upper.clone(),
+            };
             for (path, ls) in state.paths.iter_mut() {
                 ls.upper_sha = match reader.read(&PathBuf::from(path)) {
                     Some(bytes) => Some(sha_hex(&bytes)),
@@ -173,15 +183,24 @@ fn main() {
         // OUTBOUND — base-aware capture of genuinely-new local edits
         match fs_linux::read_upper_entries(&upper) {
             Ok(entries) => {
-                let reader = HardenedReader { upper: upper.clone() };
+                let reader = HardenedReader {
+                    upper: upper.clone(),
+                };
                 let base_seqs = state.base_seqs();
                 // Backpressure (#11): the upper is the agent's dirty set; warn the
                 // harness before it fills the node volume (ENOSPC mid-write).
                 let dirty = centaur_node_sync::backpressure::dirty_bytes(&entries);
                 if budget.over(dirty) {
-                    eprintln!("BACKPRESSURE: upper dirty {dirty}B OVER budget {}B — harness should pause the agent", budget.max_dirty_bytes);
+                    eprintln!(
+                        "BACKPRESSURE: upper dirty {dirty}B OVER budget {}B — harness should pause the agent",
+                        budget.max_dirty_bytes
+                    );
                 } else if budget.near(dirty) {
-                    eprintln!("backpressure: upper dirty {dirty}B near budget {}B (headroom {}B)", budget.max_dirty_bytes, budget.headroom(dirty));
+                    eprintln!(
+                        "backpressure: upper dirty {dirty}B near budget {}B (headroom {}B)",
+                        budget.max_dirty_bytes,
+                        budget.headroom(dirty)
+                    );
                 }
                 let out = capture_sweep(&entries, &base_seqs, &reader, &mut echo, &mut client);
                 for (path, seq, sha) in &out.captured {
@@ -215,7 +234,10 @@ fn main() {
                         state.sync_to(path, *seq, Some(sha.clone()), false);
                     }
                     if !captured.is_empty() {
-                        println!("wip: {} artifacts snapshotted for {repo_name}", captured.len());
+                        println!(
+                            "wip: {} artifacts snapshotted for {repo_name}",
+                            captured.len()
+                        );
                     }
                 }
                 Err(e) => eprintln!("wip {repo}: {e}"),

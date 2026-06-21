@@ -12,6 +12,7 @@
 //! This crate is platform-neutral logic + state machines (unit-tested everywhere);
 //! the syscalls (openat2/statx/xattr/`/proc`) are in fs_linux.rs behind cfg(linux)
 //! and exercised by the on-node integration tests.
+#![allow(clippy::doc_lazy_continuation)]
 
 pub mod adopt;
 pub mod backpressure;
@@ -31,7 +32,7 @@ pub mod fs_linux;
 
 use std::path::PathBuf;
 
-pub use overlay::{classify, OverlayOp, RawEntry, RawFileType, SkipReason};
+pub use overlay::{OverlayOp, RawEntry, RawFileType, SkipReason, classify};
 
 /// Reduce a scan of upper entries to the capture operations worth shipping:
 /// every classified op except the purely-structural `Dir` nodes (which carry no
@@ -55,13 +56,31 @@ mod tests {
     use std::path::PathBuf;
 
     fn reg(p: &str, size: u64) -> RawEntry {
-        RawEntry { rel_path: PathBuf::from(p), file_type: RawFileType::Regular, rdev: 0, size, xattrs: vec![] }
+        RawEntry {
+            rel_path: PathBuf::from(p),
+            file_type: RawFileType::Regular,
+            rdev: 0,
+            size,
+            xattrs: vec![],
+        }
     }
     fn whiteout(p: &str) -> RawEntry {
-        RawEntry { rel_path: PathBuf::from(p), file_type: RawFileType::CharDevice, rdev: 0, size: 0, xattrs: vec![] }
+        RawEntry {
+            rel_path: PathBuf::from(p),
+            file_type: RawFileType::CharDevice,
+            rdev: 0,
+            size: 0,
+            xattrs: vec![],
+        }
     }
     fn dir(p: &str) -> RawEntry {
-        RawEntry { rel_path: PathBuf::from(p), file_type: RawFileType::Dir, rdev: 0, size: 0, xattrs: vec![] }
+        RawEntry {
+            rel_path: PathBuf::from(p),
+            file_type: RawFileType::Dir,
+            rdev: 0,
+            size: 0,
+            xattrs: vec![],
+        }
     }
 
     #[test]

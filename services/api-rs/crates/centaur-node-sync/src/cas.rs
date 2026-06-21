@@ -55,7 +55,11 @@ fn try_ficlone(src: &Path, dst: &Path) -> io::Result<()> {
     if dst.exists() {
         fs::remove_file(dst)?;
     }
-    let d = fs::OpenOptions::new().write(true).create(true).truncate(true).open(dst)?;
+    let d = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(dst)?;
     let ret = unsafe { libc::ioctl(d.as_raw_fd(), FICLONE, s.as_raw_fd()) };
     if ret != 0 {
         return Err(io::Error::last_os_error());
@@ -70,7 +74,7 @@ pub fn probe_reflink(dir: &Path) -> bool {
     let a = dir.join(".reflink-probe-src");
     let b = dir.join(".reflink-probe-dst");
     let _ = fs::write(&a, b"probe");
-    let ok = reflink_or_copy(&a, &b).map(|reflinked| reflinked).unwrap_or(false);
+    let ok = reflink_or_copy(&a, &b).unwrap_or(false);
     let _ = fs::remove_file(&a);
     let _ = fs::remove_file(&b);
     ok
@@ -133,7 +137,8 @@ pub fn materialize_cached(
             if let Some(parent) = dst.parent() {
                 fs::create_dir_all(parent).map_err(|err| err.to_string())?;
             }
-            let reflinked = reflink_or_copy(&cas_path(cas_dir, &e.sha), &dst).map_err(|err| err.to_string())?;
+            let reflinked =
+                reflink_or_copy(&cas_path(cas_dir, &e.sha), &dst).map_err(|err| err.to_string())?;
             if reflinked {
                 out.reflinked += 1;
             } else {
@@ -180,10 +185,22 @@ mod tests {
         let lower = root.join("lower");
         fs::create_dir_all(&cas).unwrap();
         let entries = vec![
-            CasHydrateEntry { path: "proj-x/a.md".into(), seq: 5, sha: "aa11".into() },
-            CasHydrateEntry { path: "proj-x/b.md".into(), seq: 6, sha: "bb22".into() },
+            CasHydrateEntry {
+                path: "proj-x/a.md".into(),
+                seq: 5,
+                sha: "aa11".into(),
+            },
+            CasHydrateEntry {
+                path: "proj-x/b.md".into(),
+                seq: 6,
+                sha: "bb22".into(),
+            },
             // same blob as a.md (dedup) under a different path
-            CasHydrateEntry { path: "shared/copy.md".into(), seq: 7, sha: "aa11".into() },
+            CasHydrateEntry {
+                path: "shared/copy.md".into(),
+                seq: 7,
+                sha: "aa11".into(),
+            },
         ];
         let mut fetched: Vec<String> = vec![];
         let out = materialize_cached(&entries, &cas, &lower, |path, _seq| {

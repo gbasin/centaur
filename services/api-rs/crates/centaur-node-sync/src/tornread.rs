@@ -49,7 +49,11 @@ mod tests {
     use std::cell::Cell;
 
     fn id(size: u64) -> FileIdentity {
-        FileIdentity { size, mtime_ns: size as i128, ino: 7 }
+        FileIdentity {
+            size,
+            mtime_ns: size as i128,
+            ino: 7,
+        }
     }
 
     #[test]
@@ -85,6 +89,9 @@ mod tests {
             Ok(id(n.get())) // identity changes on every single stat
         };
         let read = || Ok(vec![]);
-        assert!(matches!(read_stable(2, stat, read), Err(TornReadError::ChangedTooManyTimes)));
+        assert!(matches!(
+            read_stable(2, stat, read),
+            Err(TornReadError::ChangedTooManyTimes)
+        ));
     }
 }

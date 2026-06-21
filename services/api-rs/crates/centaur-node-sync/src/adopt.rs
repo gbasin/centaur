@@ -82,7 +82,10 @@ pub fn decide_adopt(local: &LocalState, remote: &RemoteChange) -> AdoptAction {
 
     if !edited {
         // unedited locally → straight adopt of theirs (case 1 / resurrect of case 3).
-        return AdoptAction::AdoptRemote { seq: remote.seq, sha: remote.sha.clone() };
+        return AdoptAction::AdoptRemote {
+            seq: remote.seq,
+            sha: remote.sha.clone(),
+        };
     }
 
     // edited locally: if our bytes already match theirs, we converged independently.
@@ -90,14 +93,21 @@ pub fn decide_adopt(local: &LocalState, remote: &RemoteChange) -> AdoptAction {
         return AdoptAction::Skip(SkipReason::Converged);
     }
     // otherwise reconcile through Atrium's write-back (diff3 / conflict-state).
-    AdoptAction::ReconcileViaWriteback { base_seq: local.base_seq }
+    AdoptAction::ReconcileViaWriteback {
+        base_seq: local.base_seq,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn local(base_seq: u64, base_sha: &str, upper: Option<&str>, applied: Option<u64>) -> LocalState {
+    fn local(
+        base_seq: u64,
+        base_sha: &str,
+        upper: Option<&str>,
+        applied: Option<u64>,
+    ) -> LocalState {
         LocalState {
             base_seq,
             base_sha: Some(base_sha.to_string()),
@@ -106,14 +116,24 @@ mod tests {
         }
     }
     fn remote(seq: u64, sha: Option<&str>, status: RemoteStatus) -> RemoteChange {
-        RemoteChange { seq, sha: sha.map(|s| s.to_string()), status }
+        RemoteChange {
+            seq,
+            sha: sha.map(|s| s.to_string()),
+            status,
+        }
     }
 
     #[test]
     fn unedited_adopts_remote() {
         let l = local(5, "base5", None, None);
         let r = remote(6, Some("v6"), RemoteStatus::Normal);
-        assert_eq!(decide_adopt(&l, &r), AdoptAction::AdoptRemote { seq: 6, sha: Some("v6".into()) });
+        assert_eq!(
+            decide_adopt(&l, &r),
+            AdoptAction::AdoptRemote {
+                seq: 6,
+                sha: Some("v6".into())
+            }
+        );
     }
 
     #[test]
@@ -127,28 +147,40 @@ mod tests {
     fn already_current_is_skipped() {
         let l = local(6, "base6", None, None);
         let r = remote(6, Some("v6"), RemoteStatus::Normal);
-        assert_eq!(decide_adopt(&l, &r), AdoptAction::Skip(SkipReason::AlreadyCurrent));
+        assert_eq!(
+            decide_adopt(&l, &r),
+            AdoptAction::Skip(SkipReason::AlreadyCurrent)
+        );
     }
 
     #[test]
     fn locally_edited_reconciles_via_writeback() {
         let l = local(5, "base5", Some("myedit"), None);
         let r = remote(6, Some("v6"), RemoteStatus::Normal);
-        assert_eq!(decide_adopt(&l, &r), AdoptAction::ReconcileViaWriteback { base_seq: 5 });
+        assert_eq!(
+            decide_adopt(&l, &r),
+            AdoptAction::ReconcileViaWriteback { base_seq: 5 }
+        );
     }
 
     #[test]
     fn independently_converged_is_skipped() {
         let l = local(5, "base5", Some("same"), None);
         let r = remote(6, Some("same"), RemoteStatus::Normal);
-        assert_eq!(decide_adopt(&l, &r), AdoptAction::Skip(SkipReason::Converged));
+        assert_eq!(
+            decide_adopt(&l, &r),
+            AdoptAction::Skip(SkipReason::Converged)
+        );
     }
 
     #[test]
     fn remote_conflict_is_surfaced_not_applied() {
         let l = local(5, "base5", Some("myedit"), None);
         let r = remote(7, Some("markers"), RemoteStatus::Conflict);
-        assert_eq!(decide_adopt(&l, &r), AdoptAction::SurfaceConflict { seq: 7 });
+        assert_eq!(
+            decide_adopt(&l, &r),
+            AdoptAction::SurfaceConflict { seq: 7 }
+        );
     }
 
     #[test]
@@ -158,6 +190,12 @@ mod tests {
         // when the local DELETE was captured against a stale base.)
         let l = local(3, "base3", None, None);
         let r = remote(4, Some("resurrected"), RemoteStatus::Normal);
-        assert_eq!(decide_adopt(&l, &r), AdoptAction::AdoptRemote { seq: 4, sha: Some("resurrected".into()) });
+        assert_eq!(
+            decide_adopt(&l, &r),
+            AdoptAction::AdoptRemote {
+                seq: 4,
+                sha: Some("resurrected".into())
+            }
+        );
     }
 }

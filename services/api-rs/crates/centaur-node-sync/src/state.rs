@@ -30,7 +30,10 @@ impl DaemonState {
         std::fs::read(file)
             .ok()
             .and_then(|b| serde_json::from_slice::<DaemonState>(&b).ok())
-            .unwrap_or_else(|| DaemonState { cursor: "0.0".to_string(), ..Default::default() })
+            .unwrap_or_else(|| DaemonState {
+                cursor: "0.0".to_string(),
+                ..Default::default()
+            })
     }
 
     /// Persist atomically (temp + rename) so a crash never leaves a torn file.
@@ -46,7 +49,10 @@ impl DaemonState {
 
     /// The base_seq map capture passes to Atrium for OCC.
     pub fn base_seqs(&self) -> HashMap<String, u64> {
-        self.paths.iter().map(|(p, s)| (p.clone(), s.base_seq)).collect()
+        self.paths
+            .iter()
+            .map(|(p, s)| (p.clone(), s.base_seq))
+            .collect()
     }
 
     pub fn locals(&self) -> &HashMap<String, LocalState> {

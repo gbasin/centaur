@@ -63,10 +63,22 @@ mod tests {
     use std::path::PathBuf;
 
     fn reg(size: u64) -> RawEntry {
-        RawEntry { rel_path: PathBuf::from("f"), file_type: RawFileType::Regular, rdev: 0, size, xattrs: vec![] }
+        RawEntry {
+            rel_path: PathBuf::from("f"),
+            file_type: RawFileType::Regular,
+            rdev: 0,
+            size,
+            xattrs: vec![],
+        }
     }
     fn whiteout() -> RawEntry {
-        RawEntry { rel_path: PathBuf::from("d"), file_type: RawFileType::CharDevice, rdev: 0, size: 999, xattrs: vec![] }
+        RawEntry {
+            rel_path: PathBuf::from("d"),
+            file_type: RawFileType::CharDevice,
+            rdev: 0,
+            size: 999,
+            xattrs: vec![],
+        }
     }
 
     #[test]
@@ -77,7 +89,9 @@ mod tests {
 
     #[test]
     fn budget_flags_over_and_near() {
-        let b = Budget { max_dirty_bytes: 1000 };
+        let b = Budget {
+            max_dirty_bytes: 1000,
+        };
         assert!(!b.over(500));
         assert!(b.over(1001));
         assert!(!b.near(800));

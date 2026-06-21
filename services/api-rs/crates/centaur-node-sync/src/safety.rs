@@ -32,7 +32,8 @@ pub fn is_safe_relpath(p: &Path) -> bool {
     if p.as_os_str().is_empty() {
         return false;
     }
-    p.components().all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+    p.components()
+        .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
 }
 
 #[cfg(test)]
