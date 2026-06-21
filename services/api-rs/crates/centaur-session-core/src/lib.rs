@@ -3,6 +3,8 @@
 //! A session is the public control-plane object for one ongoing agent
 //! conversation. `thread_key` is the canonical identifier.
 
+pub mod sandbox_token;
+
 use std::{fmt, str::FromStr};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};

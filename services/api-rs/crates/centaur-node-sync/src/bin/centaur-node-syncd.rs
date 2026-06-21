@@ -9,8 +9,11 @@
 //! endpoints).
 //!
 //! Env: ATRIUM_BASE_URL, ATRIUM_CAPTURE_API_KEY, NODE_SYNC_SESSION,
-//!      NODE_SYNC_UPPER, NODE_SYNC_MERGED, NODE_SYNC_STATE (default
-//!      /var/lib/centaur/sync-state/<session>.json), NODE_SYNC_INTERVAL_SECS (2).
+//!      NODE_SYNC_UPPER, NODE_SYNC_MERGED, optional NODE_SYNC_HARNESS,
+//!      optional NODE_SYNC_HARNESS_THREAD_ID, optional NODE_SYNC_HARNESS_HOME,
+//!      NODE_SYNC_STATE
+//!      (default /var/lib/centaur/sync-state/<session>.json),
+//!      NODE_SYNC_INTERVAL_SECS (2).
 //! Flags: --once (hydrate if needed + one capture + one inbound sweep, then exit).
 
 #[cfg(target_os = "linux")]
@@ -20,7 +23,8 @@ fn main() {
     use centaur_node_sync::http_client::HttpAtriumClient;
     use centaur_node_sync::quiesce::{LeaseGate, apply_quiesced_writes};
     use centaur_node_sync::runtime::{
-        AtriumClient, UpperReader, capture_sweep, inbound_sweep, sha_hex,
+        AtriumClient, HarnessTranscriptKind, UpperReader, capture_sweep, harness_transcript_sweep,
+        inbound_sweep, sha_hex,
     };
     use centaur_node_sync::state::DaemonState;
     use std::path::{Path, PathBuf};
@@ -30,6 +34,9 @@ fn main() {
     let base_url = env("ATRIUM_BASE_URL");
     let api_key = env("ATRIUM_CAPTURE_API_KEY");
     let session = env("NODE_SYNC_SESSION");
+    let harness = HarnessTranscriptKind::parse(&env("NODE_SYNC_HARNESS"));
+    let harness_thread_id = env("NODE_SYNC_HARNESS_THREAD_ID");
+    let harness_home = env("NODE_SYNC_HARNESS_HOME");
     let upper = PathBuf::from(env("NODE_SYNC_UPPER"));
     let merged = PathBuf::from(env("NODE_SYNC_MERGED"));
     // Optional: a repo working tree whose uncommitted WIP we snapshot to the ledger
@@ -312,6 +319,39 @@ fn main() {
                 );
                 for (p, e) in &out.errors {
                     eprintln!("  capture error {p}: {e}");
+                }
+                let harnesses: Vec<(HarnessTranscriptKind, PathBuf)> = match harness {
+                    Some(kind) => vec![(
+                        kind,
+                        if harness_home.is_empty() {
+                            PathBuf::from(kind.default_home_rel())
+                        } else {
+                            PathBuf::from(&harness_home)
+                        },
+                    )],
+                    None => [HarnessTranscriptKind::Claude, HarnessTranscriptKind::Codex]
+                        .into_iter()
+                        .map(|kind| (kind, PathBuf::from(kind.default_home_rel())))
+                        .collect(),
+                };
+                for (harness, harness_home) in harnesses {
+                    let out = harness_transcript_sweep(
+                        &entries,
+                        &reader,
+                        &mut client,
+                        harness,
+                        &harness_home,
+                        &harness_thread_id,
+                    );
+                    if let Some((path, bytes)) = out.captured {
+                        println!(
+                            "harness transcript: captured {} bytes from {}",
+                            bytes,
+                            path.display()
+                        );
+                    } else if let Some(error) = out.error {
+                        eprintln!("harness transcript: {error}");
+                    }
                 }
             }
             Err(e) => eprintln!("scan {}: {e}", upper.display()),

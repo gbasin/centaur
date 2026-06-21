@@ -24,6 +24,8 @@ pub enum ApiError {
     PayloadTooLarge(String),
     #[error("{0}")]
     ServiceUnavailable(String),
+    #[error("{0}")]
+    BadGateway(String),
     /// Server-side misconfiguration or invariant failure. The message is
     /// logged but never returned to the client.
     #[error("{0}")]
@@ -51,6 +53,7 @@ impl IntoResponse for ApiError {
             Self::MethodNotAllowed(_) => StatusCode::METHOD_NOT_ALLOWED,
             Self::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             Self::ServiceUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+            Self::BadGateway(_) => StatusCode::BAD_GATEWAY,
             Self::Runtime(SessionRuntimeError::BadRequest(_)) => StatusCode::BAD_REQUEST,
             Self::Runtime(SessionRuntimeError::Store(SessionStoreError::NotFound { .. })) => {
                 StatusCode::NOT_FOUND

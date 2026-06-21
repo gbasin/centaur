@@ -38,6 +38,11 @@ pub trait AtriumClient {
     fn post_delete(&mut self, path: &str, base_seq: u64) -> Result<u64, String>;
     /// Fetch the bytes of a remote version (for an inbound adopt).
     fn fetch_bytes(&mut self, path: &str, seq: u64) -> Result<Vec<u8>, String>;
+    /// PUT the harness CLI's own transcript snapshot. This is internal harness
+    /// state, not an artifact, so it bypasses the artifact ledger.
+    fn put_harness_transcript(&mut self, _harness: &str, _bytes: &[u8]) -> Result<(), String> {
+        Ok(())
+    }
     /// Poll the gap-free change-feed past `cursor` → (path, remote-change) rows +
     /// the next cursor. Default: nothing (the live HTTP impl overrides it).
     fn poll_changes(
@@ -45,6 +50,36 @@ pub trait AtriumClient {
         _cursor: &str,
     ) -> Result<(Vec<(String, RemoteChange)>, String), String> {
         Ok((vec![], _cursor.to_string()))
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum HarnessTranscriptKind {
+    Claude,
+    Codex,
+}
+
+impl HarnessTranscriptKind {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "claude" | "claude-code" | "claudecode" => Some(Self::Claude),
+            "codex" => Some(Self::Codex),
+            _ => None,
+        }
+    }
+
+    pub fn atrium_harness(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+        }
+    }
+
+    pub fn default_home_rel(self) -> &'static str {
+        match self {
+            Self::Claude => ".claude",
+            Self::Codex => ".codex",
+        }
     }
 }
 
@@ -112,6 +147,13 @@ pub struct CaptureOutcome {
 /// ones stream (constant memory) and are routed OUT of the overlay dirty-byte
 /// budget. 8 MiB keeps the common case (notes/code/configs) on the simple path.
 pub const DEFAULT_LARGE_FILE_BYTES: u64 = 8 * 1024 * 1024;
+
+#[derive(Debug, Default)]
+pub struct HarnessTranscriptOutcome {
+    pub captured: Option<(PathBuf, usize)>,
+    pub skipped: bool,
+    pub error: Option<String>,
+}
 
 /// One capture sweep: classify the upper, read bytes for each upsert, and POST to
 /// Atrium with the hydrated base_seq — suppressing the node's own write-backs via
@@ -199,6 +241,105 @@ pub fn capture_sweep(
         }
     }
     out
+}
+
+pub fn locate_harness_transcript(
+    entries: &[RawEntry],
+    harness: HarnessTranscriptKind,
+    harness_home: &Path,
+    thread_id: &str,
+) -> Option<PathBuf> {
+    let thread_id = thread_id.trim();
+    match harness {
+        HarnessTranscriptKind::Claude if !thread_id.is_empty() => {
+            let path = harness_home
+                .join("projects")
+                .join("-home-agent-workspace")
+                .join(format!("{thread_id}.jsonl"));
+            entries
+                .iter()
+                .any(|entry| {
+                    entry.file_type == crate::overlay::RawFileType::Regular
+                        && entry.rel_path == path
+                })
+                .then_some(path)
+        }
+        HarnessTranscriptKind::Claude => entries
+            .iter()
+            .filter(|entry| entry.file_type == crate::overlay::RawFileType::Regular)
+            .filter(|entry| {
+                entry
+                    .rel_path
+                    .starts_with(harness_home.join("projects").join("-home-agent-workspace"))
+            })
+            .filter(|entry| {
+                entry
+                    .rel_path
+                    .extension()
+                    .is_some_and(|extension| extension == "jsonl")
+            })
+            .map(|entry| entry.rel_path.clone())
+            .max(),
+        HarnessTranscriptKind::Codex if !thread_id.is_empty() => {
+            let file_name = format!("rollout-{thread_id}.jsonl");
+            entries
+                .iter()
+                .filter(|entry| entry.file_type == crate::overlay::RawFileType::Regular)
+                .filter(|entry| entry.rel_path.starts_with(harness_home.join("sessions")))
+                .filter(|entry| {
+                    entry
+                        .rel_path
+                        .file_name()
+                        .is_some_and(|name| name.to_string_lossy() == file_name)
+                })
+                .map(|entry| entry.rel_path.clone())
+                .max()
+        }
+        HarnessTranscriptKind::Codex => entries
+            .iter()
+            .filter(|entry| entry.file_type == crate::overlay::RawFileType::Regular)
+            .filter(|entry| entry.rel_path.starts_with(harness_home.join("sessions")))
+            .filter(|entry| {
+                entry.rel_path.file_name().is_some_and(|name| {
+                    let name = name.to_string_lossy();
+                    name.starts_with("rollout-") && name.ends_with(".jsonl")
+                })
+            })
+            .map(|entry| entry.rel_path.clone())
+            .max(),
+    }
+}
+
+pub fn harness_transcript_sweep(
+    entries: &[RawEntry],
+    reader: &dyn UpperReader,
+    client: &mut dyn AtriumClient,
+    harness: HarnessTranscriptKind,
+    harness_home: &Path,
+    thread_id: &str,
+) -> HarnessTranscriptOutcome {
+    let Some(path) = locate_harness_transcript(entries, harness, harness_home, thread_id) else {
+        return HarnessTranscriptOutcome {
+            skipped: true,
+            ..HarnessTranscriptOutcome::default()
+        };
+    };
+    let Some(bytes) = reader.read(&path) else {
+        return HarnessTranscriptOutcome {
+            error: Some(format!("unreadable transcript {}", path.display())),
+            ..HarnessTranscriptOutcome::default()
+        };
+    };
+    match client.put_harness_transcript(harness.atrium_harness(), &bytes) {
+        Ok(()) => HarnessTranscriptOutcome {
+            captured: Some((path, bytes.len())),
+            ..HarnessTranscriptOutcome::default()
+        },
+        Err(error) => HarnessTranscriptOutcome {
+            error: Some(error),
+            ..HarnessTranscriptOutcome::default()
+        },
+    }
 }
 
 /// Capture uncommitted repo WIP to the ledger as a recovery point (§5A / H6).
@@ -359,6 +500,7 @@ mod tests {
     #[derive(Default)]
     struct FakeClient {
         captures: Vec<(String, u64)>,
+        transcripts: Vec<(String, Vec<u8>)>,
         next_seq: u64,
     }
     impl AtriumClient for FakeClient {
@@ -373,6 +515,10 @@ mod tests {
         }
         fn fetch_bytes(&mut self, _path: &str, _seq: u64) -> Result<Vec<u8>, String> {
             Ok(b"remote bytes".to_vec())
+        }
+        fn put_harness_transcript(&mut self, harness: &str, bytes: &[u8]) -> Result<(), String> {
+            self.transcripts.push((harness.to_owned(), bytes.to_vec()));
+            Ok(())
         }
     }
 
@@ -439,6 +585,114 @@ mod tests {
         );
         assert_eq!(out.skipped_echo.len(), 1);
         assert!(out.captured.is_empty()); // not re-captured
+    }
+
+    #[test]
+    fn locates_claude_transcript_at_workspace_project_path() {
+        let entries = vec![reg(".claude/projects/-home-agent-workspace/thread-1.jsonl")];
+
+        assert_eq!(
+            locate_harness_transcript(
+                &entries,
+                HarnessTranscriptKind::Claude,
+                Path::new(".claude"),
+                "thread-1",
+            ),
+            Some(PathBuf::from(
+                ".claude/projects/-home-agent-workspace/thread-1.jsonl"
+            ))
+        );
+    }
+
+    #[test]
+    fn locates_codex_rollout_transcript_under_sessions() {
+        let entries = vec![reg(".codex/sessions/2026/06/21/rollout-thread-1.jsonl")];
+
+        assert_eq!(
+            locate_harness_transcript(
+                &entries,
+                HarnessTranscriptKind::Codex,
+                Path::new(".codex"),
+                "thread-1",
+            ),
+            Some(PathBuf::from(
+                ".codex/sessions/2026/06/21/rollout-thread-1.jsonl"
+            ))
+        );
+    }
+
+    #[test]
+    fn locates_claude_transcript_without_manual_thread_id() {
+        let entries = vec![
+            reg(".claude/projects/-home-agent-workspace/thread-1.jsonl"),
+            reg(".claude/projects/-home-agent-workspace/thread-2.jsonl"),
+        ];
+
+        assert_eq!(
+            locate_harness_transcript(
+                &entries,
+                HarnessTranscriptKind::Claude,
+                Path::new(".claude"),
+                ""
+            ),
+            Some(PathBuf::from(
+                ".claude/projects/-home-agent-workspace/thread-2.jsonl"
+            ))
+        );
+    }
+
+    #[test]
+    fn locates_codex_rollout_without_manual_thread_id() {
+        let entries = vec![
+            reg(".codex/sessions/2026/06/20/rollout-thread-1.jsonl"),
+            reg(".codex/sessions/2026/06/21/rollout-thread-2.jsonl"),
+        ];
+
+        assert_eq!(
+            locate_harness_transcript(
+                &entries,
+                HarnessTranscriptKind::Codex,
+                Path::new(".codex"),
+                ""
+            ),
+            Some(PathBuf::from(
+                ".codex/sessions/2026/06/21/rollout-thread-2.jsonl"
+            ))
+        );
+    }
+
+    #[test]
+    fn harness_transcript_sweep_puts_bytes_without_artifact_capture() {
+        let entries = vec![reg(".claude/projects/-home-agent-workspace/thread-1.jsonl")];
+        let mut files = HashMap::new();
+        files.insert(
+            PathBuf::from(".claude/projects/-home-agent-workspace/thread-1.jsonl"),
+            b"{\"type\":\"assistant\"}\n".to_vec(),
+        );
+        let reader = MapReader(files);
+        let mut client = FakeClient::default();
+
+        let out = harness_transcript_sweep(
+            &entries,
+            &reader,
+            &mut client,
+            HarnessTranscriptKind::Claude,
+            Path::new(".claude"),
+            "thread-1",
+        );
+
+        assert_eq!(
+            out.captured,
+            Some((
+                PathBuf::from(".claude/projects/-home-agent-workspace/thread-1.jsonl"),
+                21,
+            ))
+        );
+        assert_eq!(client.captures, Vec::new());
+        assert_eq!(
+            client.transcripts,
+            vec![("claude".to_owned(), b"{\"type\":\"assistant\"}\n".to_vec())]
+        );
     }
 
     #[test]
