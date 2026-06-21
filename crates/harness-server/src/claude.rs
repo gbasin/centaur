@@ -216,7 +216,13 @@ impl HarnessServer for ClaudeCodeHarness {
     }
 
     fn command_for_turn(&self, state: &ThreadState) -> ProcessCommand {
-        if let Some(command) = command_from_override("CENTAUR_CLAUDE_APP_BRIDGE_COMMAND") {
+        if let Some(mut command) = command_from_override("CENTAUR_CLAUDE_APP_BRIDGE_COMMAND") {
+            command.env("CENTAUR_CLAUDE_MODEL", &state.model);
+            command.env("CENTAUR_CLAUDE_MODEL_PROVIDER", &state.model_provider);
+            command.env("CENTAUR_CLAUDE_SESSION_ID", &state.id);
+            if let Some(session_id) = &state.harness_session_id {
+                command.env("CENTAUR_CLAUDE_RESUME_SESSION_ID", session_id);
+            }
             return command;
         }
 
