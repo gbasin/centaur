@@ -122,6 +122,40 @@ pub fn capture_sweep(
     out
 }
 
+/// Capture uncommitted repo WIP to the ledger as a recovery point (§5A / H6).
+/// PURE-READ: the bytes come from `wip::capture_wip` (a `git diff HEAD` + untracked
+/// snapshot, zero git writes). Lands as normal artifacts under `wip/<repo>/…` so a
+/// crash/destroy doesn't lose uncommitted work; recovery = re-clone @ HEAD + apply
+/// the patch + drop the untracked files. Content-dedup means an unchanged WIP is
+/// idempotent (no churn). Returns the captured (path, seq, sha) for state tracking.
+pub fn wip_sweep(
+    repo_name: &str,
+    patch: &crate::wip::WipPatch,
+    base_seqs: &HashMap<String, u64>,
+    client: &mut dyn AtriumClient,
+) -> Vec<(String, u64, String)> {
+    let mut captured = Vec::new();
+    if patch.is_empty() {
+        return captured;
+    }
+    // the base HEAD sha (so recovery knows what to clone), the tracked diff, and
+    // each untracked file — each a normal artifact under wip/<repo>/.
+    let mut items: Vec<(String, Vec<u8>)> = vec![
+        (format!("wip/{repo_name}/HEAD"), patch.base_head_sha.clone().into_bytes()),
+        (format!("wip/{repo_name}/patch.diff"), patch.diff.clone().into_bytes()),
+    ];
+    for (rel, bytes) in &patch.untracked {
+        items.push((format!("wip/{repo_name}/untracked/{rel}"), bytes.clone()));
+    }
+    for (path, bytes) in items {
+        let base = base_seqs.get(&path).copied().unwrap_or(0);
+        if let Ok(seq) = client.post_capture(&path, base, &bytes) {
+            captured.push((path, seq, sha_hex(&bytes)));
+        }
+    }
+    captured
+}
+
 /// One entry of the hydration manifest: the path + the version to materialize.
 #[derive(Debug, Clone)]
 pub struct HydrateEntry {
@@ -312,6 +346,29 @@ mod tests {
         assert_eq!(out.base_seqs.len(), 1); // only ok.md hydrated
         assert_eq!(out.errors.len(), 1);
         assert_eq!(out.errors[0].0, "bad.md");
+    }
+
+    #[test]
+    fn wip_sweep_posts_head_diff_and_untracked() {
+        let patch = crate::wip::WipPatch {
+            base_head_sha: "abc123".into(),
+            diff: "diff --git a/x b/x".into(),
+            untracked: vec![("new.txt".into(), b"hi".to_vec())],
+        };
+        let mut client = FakeClient::default();
+        let captured = wip_sweep("myrepo", &patch, &HashMap::new(), &mut client);
+        let paths: Vec<&str> = captured.iter().map(|(p, _, _)| p.as_str()).collect();
+        assert_eq!(captured.len(), 3); // HEAD + patch.diff + 1 untracked
+        assert!(paths.contains(&"wip/myrepo/HEAD"));
+        assert!(paths.contains(&"wip/myrepo/patch.diff"));
+        assert!(paths.contains(&"wip/myrepo/untracked/new.txt"));
+    }
+
+    #[test]
+    fn wip_sweep_skips_an_empty_patch() {
+        let patch = crate::wip::WipPatch { base_head_sha: "x".into(), diff: String::new(), untracked: vec![] };
+        let mut client = FakeClient::default();
+        assert!(wip_sweep("r", &patch, &HashMap::new(), &mut client).is_empty());
     }
 
     #[test]

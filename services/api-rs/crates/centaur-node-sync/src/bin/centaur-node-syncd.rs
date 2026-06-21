@@ -30,6 +30,17 @@ fn main() {
     let session = env("NODE_SYNC_SESSION");
     let upper = PathBuf::from(env("NODE_SYNC_UPPER"));
     let merged = PathBuf::from(env("NODE_SYNC_MERGED"));
+    // Optional: a repo working tree whose uncommitted WIP we snapshot to the ledger
+    // (pure-read git diff, H6/§5A). Empty = no WIP capture.
+    let repo = env("NODE_SYNC_REPO");
+    let repo_name = if repo.is_empty() {
+        String::new()
+    } else {
+        std::path::Path::new(&repo)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "repo".to_string())
+    };
     let interval = env("NODE_SYNC_INTERVAL_SECS").parse::<u64>().unwrap_or(2);
     let state_file = {
         let s = env("NODE_SYNC_STATE");
@@ -175,6 +186,27 @@ fn main() {
                 }
             }
             Err(e) => eprintln!("scan {}: {e}", upper.display()),
+        }
+
+        // WIP — snapshot uncommitted repo work to the ledger (pure-read; H6/§5A)
+        if !repo.is_empty() {
+            match centaur_node_sync::wip::capture_wip(std::path::Path::new(&repo)) {
+                Ok(patch) => {
+                    let captured = centaur_node_sync::runtime::wip_sweep(
+                        &repo_name,
+                        &patch,
+                        &state.base_seqs(),
+                        &mut client,
+                    );
+                    for (path, seq, sha) in &captured {
+                        state.sync_to(path, *seq, Some(sha.clone()), false);
+                    }
+                    if !captured.is_empty() {
+                        println!("wip: {} artifacts snapshotted for {repo_name}", captured.len());
+                    }
+                }
+                Err(e) => eprintln!("wip {repo}: {e}"),
+            }
         }
 
         let _ = state.save(&state_file);
