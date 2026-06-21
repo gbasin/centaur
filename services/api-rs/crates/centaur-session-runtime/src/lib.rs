@@ -1,13 +1,14 @@
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
+    env,
     sync::Arc,
     time::{Duration, SystemTime},
 };
 
 use centaur_iron_control::SessionRegistrar;
 use centaur_sandbox_core::{
-    Mount, SandboxBackend, SandboxError, SandboxId, SandboxIoGuard, SandboxRead, SandboxSpec,
-    SandboxStatus, SandboxWrite,
+    Mount, MountKind, SandboxBackend, SandboxError, SandboxId, SandboxIoGuard, SandboxRead,
+    SandboxSpec, SandboxStatus, SandboxWrite,
 };
 use centaur_sandbox_manager::{
     SandboxManager, SandboxReaper, SandboxReaperConfig, WarmPoolConfig, WarmPoolError,
@@ -15,7 +16,7 @@ use centaur_sandbox_manager::{
 };
 use centaur_session_core::{
     ExecutionStatus, HarnessType, MessageRole, Session, SessionEvent, SessionExecution,
-    SessionMessageInput, ThreadKey,
+    SessionMessageInput, ThreadKey, sandbox_token,
 };
 use centaur_session_sqlx::{
     ArtifactBlob, ArtifactCaptureInput, ArtifactCaptureResult, PgSessionStore,
@@ -45,8 +46,12 @@ const STEERING_STARTUP_RETRY_TIMEOUT: Duration = Duration::from_secs(15);
 const COMPONENT_SESSION_RUNTIME: &str = "session_runtime";
 const CLAUDE_CODE_OAUTH_TOKEN_ENV: &str = "CLAUDE_CODE_OAUTH_TOKEN";
 const CODEX_AUTH_JSON_ENV: &str = "CODEX_AUTH_JSON";
+const SANDBOX_STATE_DIR: &str = "/home/agent/state";
+const SANDBOX_CODEX_HOME: &str = "/home/agent/state/codex";
+const SANDBOX_CLAUDE_CONFIG_DIR: &str = "/home/agent/state/claude";
 
-type SandboxSpecFactory = Arc<dyn Fn(&ThreadKey, &str, &HarnessType) -> SandboxSpec + Send + Sync>;
+type SandboxSpecFactory =
+    Arc<dyn Fn(&ThreadKey, &str, &HarnessType, Option<&str>) -> SandboxSpec + Send + Sync>;
 type SessionInputSink = FramedWrite<SandboxWrite, LinesCodec>;
 type ExecutionSpanRegistry = Arc<Mutex<HashMap<String, Span>>>;
 type SessionOperationLocks = Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>;
@@ -880,6 +885,11 @@ impl SessionRuntime {
                 "starting session execution"
             );
             let session = self.store.get_session(thread_key).await?;
+            let resume_thread_id = session
+                .harness_thread_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|thread_id| !thread_id.is_empty());
             let harness_label = session.harness_type.to_string();
             validate_input_lines(&input_lines)?;
             let environment = validate_execution_environment(&session.harness_type, environment)?;
@@ -975,6 +985,7 @@ impl SessionRuntime {
                     &session.harness_type,
                     session.sandbox_id.as_deref(),
                     session.iron_control_principal.as_deref(),
+                    resume_thread_id,
                     &execution.execution_id,
                     &environment,
                 )
@@ -1397,6 +1408,7 @@ impl SessionRuntime {
         harness_type: &HarnessType,
         existing_sandbox_id: Option<&str>,
         iron_control_principal: Option<&str>,
+        resume_thread_id: Option<&str>,
         execution_id: &str,
         environment: &[(String, String)],
     ) -> Result<String, SessionRuntimeError> {
@@ -1448,69 +1460,92 @@ impl SessionRuntime {
                         }
                         ExistingSandboxAction::ResumeOrReplace => {
                             self.sandbox_pipes.lock().await.remove(sandbox_id);
-                            match self.sandbox_runtime.manager.resume(&id).await {
-                                Ok(()) => {
-                                    span.record("centaur.sandbox_id", sandbox_id);
-                                    span.record("sandbox_id", sandbox_id);
-                                    let ready_duration = ensure_started.elapsed();
-                                    self.store
-                                        .append_event(
-                                            thread_key,
-                                            Some(execution_id),
-                                            "session.sandbox_resumed",
-                                            json!({
-                                                "execution_id": execution_id,
-                                                "thread_key": thread_key.as_str(),
-                                                "sandbox_id": sandbox_id,
-                                            }),
-                                        )
-                                        .await?;
-                                    self.record_sandbox_ready(SandboxReadyObservation {
-                                        thread_key,
-                                        execution_id,
-                                        sandbox_id,
-                                        harness_type,
-                                        source: "resumed",
-                                        ready_duration,
-                                        startup_duration: None,
-                                    })
-                                    .await;
-                                    info!(
-                                        component = COMPONENT_SESSION_RUNTIME,
-                                        event = "sandbox_ensure_resumed",
-                                        thread_key = %thread_key,
-                                        execution_id,
-                                        sandbox_id,
-                                        harness_type = %harness_type,
-                                        sandbox_ready_source = "resumed",
-                                        sandbox_ready_duration_ms = duration_millis_u64(ready_duration),
-                                        "resumed existing session sandbox"
-                                    );
-                                    return Ok(sandbox_id.to_owned());
-                                }
-                                Err(error) => {
+                            if resume_thread_id.is_some() {
+                                info!(
+                                    component = COMPONENT_SESSION_RUNTIME,
+                                    event = "sandbox_ensure_replacing_for_resume_restore",
+                                    thread_key = %thread_key,
+                                    execution_id,
+                                    sandbox_id,
+                                    harness_type = %harness_type,
+                                    "replacing existing sandbox so transcript restore env is present"
+                                );
+                                if let Err(error) = self.sandbox_runtime.manager.stop(&id).await {
                                     warn!(
                                         component = COMPONENT_SESSION_RUNTIME,
-                                        event = "sandbox_ensure_resume_failed",
+                                        event = "sandbox_ensure_resume_replace_stop_failed",
                                         %thread_key,
                                         %execution_id,
                                         %sandbox_id,
                                         %error,
-                                        "replacing sandbox after resume failed"
+                                        "failed to stop sandbox before resume-target replacement"
                                     );
-                                    self.store
-                                        .append_event(
+                                }
+                            } else {
+                                match self.sandbox_runtime.manager.resume(&id).await {
+                                    Ok(()) => {
+                                        span.record("centaur.sandbox_id", sandbox_id);
+                                        span.record("sandbox_id", sandbox_id);
+                                        let ready_duration = ensure_started.elapsed();
+                                        self.store
+                                            .append_event(
+                                                thread_key,
+                                                Some(execution_id),
+                                                "session.sandbox_resumed",
+                                                json!({
+                                                    "execution_id": execution_id,
+                                                    "thread_key": thread_key.as_str(),
+                                                    "sandbox_id": sandbox_id,
+                                                }),
+                                            )
+                                            .await?;
+                                        self.record_sandbox_ready(SandboxReadyObservation {
                                             thread_key,
-                                            Some(execution_id),
-                                            "session.sandbox_resume_failed",
-                                            json!({
-                                                "execution_id": execution_id,
-                                                "thread_key": thread_key.as_str(),
-                                                "sandbox_id": sandbox_id,
-                                                "error": error.to_string(),
-                                            }),
-                                        )
-                                        .await?;
+                                            execution_id,
+                                            sandbox_id,
+                                            harness_type,
+                                            source: "resumed",
+                                            ready_duration,
+                                            startup_duration: None,
+                                        })
+                                        .await;
+                                        info!(
+                                            component = COMPONENT_SESSION_RUNTIME,
+                                            event = "sandbox_ensure_resumed",
+                                            thread_key = %thread_key,
+                                            execution_id,
+                                            sandbox_id,
+                                            harness_type = %harness_type,
+                                            sandbox_ready_source = "resumed",
+                                            sandbox_ready_duration_ms = duration_millis_u64(ready_duration),
+                                            "resumed existing session sandbox"
+                                        );
+                                        return Ok(sandbox_id.to_owned());
+                                    }
+                                    Err(error) => {
+                                        warn!(
+                                            component = COMPONENT_SESSION_RUNTIME,
+                                            event = "sandbox_ensure_resume_failed",
+                                            %thread_key,
+                                            %execution_id,
+                                            %sandbox_id,
+                                            %error,
+                                            "replacing sandbox after resume failed"
+                                        );
+                                        self.store
+                                            .append_event(
+                                                thread_key,
+                                                Some(execution_id),
+                                                "session.sandbox_resume_failed",
+                                                json!({
+                                                    "execution_id": execution_id,
+                                                    "thread_key": thread_key.as_str(),
+                                                    "sandbox_id": sandbox_id,
+                                                    "error": error.to_string(),
+                                                }),
+                                            )
+                                            .await?;
+                                    }
                                 }
                             }
                         }
@@ -1553,7 +1588,9 @@ impl SessionRuntime {
             if let Some(warm_pool) = self
                 .warm_pool
                 .as_ref()
-                .filter(|_| warm_harness_matches && environment.is_empty())
+                .filter(|_| {
+                    warm_harness_matches && environment.is_empty() && resume_thread_id.is_none()
+                })
             {
                 match warm_pool
                     .claim(thread_key.as_str(), iron_control_principal)
@@ -1612,7 +1649,12 @@ impl SessionRuntime {
             }
 
             let mut spec =
-                (self.sandbox_runtime.spec_factory)(thread_key, execution_id, harness_type);
+                (self.sandbox_runtime.spec_factory)(
+                    thread_key,
+                    execution_id,
+                    harness_type,
+                    resume_thread_id,
+                );
             for (name, value) in environment {
                 spec = spec.env(name.clone(), value.clone());
             }
@@ -2105,9 +2147,10 @@ impl SandboxRuntime {
     pub fn backend(backend: Arc<dyn SandboxBackend>, spec: SandboxSpec) -> Self {
         let warm_spec = spec.clone();
         let spec_factory =
-            move |_thread_key: &ThreadKey, _execution_id: &str, _harness: &HarnessType| {
-                spec.clone()
-            };
+            move |_thread_key: &ThreadKey,
+                  _execution_id: &str,
+                  _harness: &HarnessType,
+                  _resume_thread_id: Option<&str>| { spec.clone() };
         let warm_spec_factory = move || warm_spec.clone();
         Self::backend_with_warm_spec_factory(backend, spec_factory, warm_spec_factory)
     }
@@ -2120,9 +2163,9 @@ impl SandboxRuntime {
         let warm_workload = workload.clone();
         let mut runtime = Self::backend_with_warm_spec_factory(
             backend,
-            move |thread_key, execution_id, harness| {
+            move |thread_key, execution_id, harness, resume_thread_id| {
                 workload
-                    .spec(thread_key, harness)
+                    .spec_with_resume_target(thread_key, harness, resume_thread_id)
                     .env("CENTAUR_EXECUTION_ID", execution_id)
             },
             move || warm_workload.warm_spec(),
@@ -2133,7 +2176,7 @@ impl SandboxRuntime {
 
     pub fn backend_with_spec_factory<F>(backend: Arc<dyn SandboxBackend>, spec_factory: F) -> Self
     where
-        F: Fn(&ThreadKey, &str, &HarnessType) -> SandboxSpec + Send + Sync + 'static,
+        F: Fn(&ThreadKey, &str, &HarnessType, Option<&str>) -> SandboxSpec + Send + Sync + 'static,
     {
         Self {
             manager: Arc::new(SandboxManager::new(backend)),
@@ -2150,7 +2193,7 @@ impl SandboxRuntime {
         warm_spec_factory: W,
     ) -> Self
     where
-        F: Fn(&ThreadKey, &str, &HarnessType) -> SandboxSpec + Send + Sync + 'static,
+        F: Fn(&ThreadKey, &str, &HarnessType, Option<&str>) -> SandboxSpec + Send + Sync + 'static,
         W: Fn() -> SandboxSpec + Send + Sync + 'static,
     {
         let warm_spec_factory: WarmSandboxSpecFactory = Arc::new(warm_spec_factory);
@@ -2200,18 +2243,33 @@ impl SandboxWorkloadMode {
         }
     }
 
+    #[cfg(test)]
     fn spec(&self, thread_key: &ThreadKey, harness: &HarnessType) -> SandboxSpec {
-        self.spec_for(Some(thread_key), harness)
+        self.spec_for(Some(thread_key), harness, None)
+    }
+
+    fn spec_with_resume_target(
+        &self,
+        thread_key: &ThreadKey,
+        harness: &HarnessType,
+        resume_thread_id: Option<&str>,
+    ) -> SandboxSpec {
+        self.spec_for(Some(thread_key), harness, resume_thread_id)
     }
 
     fn warm_spec(&self) -> SandboxSpec {
         match self {
-            Self::MockAppServer { .. } => self.spec_for(None, &HarnessType::Codex),
-            Self::CodexAppServer { harness, .. } => self.spec_for(None, harness),
+            Self::MockAppServer { .. } => self.spec_for(None, &HarnessType::Codex, None),
+            Self::CodexAppServer { harness, .. } => self.spec_for(None, harness, None),
         }
     }
 
-    fn spec_for(&self, thread_key: Option<&ThreadKey>, harness: &HarnessType) -> SandboxSpec {
+    fn spec_for(
+        &self,
+        thread_key: Option<&ThreadKey>,
+        harness: &HarnessType,
+        resume_thread_id: Option<&str>,
+    ) -> SandboxSpec {
         match self {
             Self::MockAppServer { image } => SandboxSpec::new(image)
                 .command(["/bin/sh", "-lc"])
@@ -2226,9 +2284,27 @@ impl SandboxWorkloadMode {
                 let mut spec = SandboxSpec::new(image)
                     .label("centaur.ai/component", "session-sandbox")
                     .label("centaur.ai/harness", harness.to_string())
-                    .args(["harness-server", harness_server_subcommand(harness)]);
+                    .args(["harness-server", harness_server_subcommand(harness)])
+                    .env("CENTAUR_HARNESS_TYPE", harness_server_subcommand(harness))
+                    .env("CENTAUR_STATE_DIR", SANDBOX_STATE_DIR)
+                    .env("CODEX_HOME", SANDBOX_CODEX_HOME)
+                    .env("CLAUDE_CONFIG_DIR", SANDBOX_CLAUDE_CONFIG_DIR)
+                    .mount(Mount::new(MountKind::EmptyDir, SANDBOX_STATE_DIR));
                 if let Some(thread_key) = thread_key {
                     spec = spec.env("CENTAUR_THREAD_KEY", thread_key.as_str());
+                    if let Some(token) = scoped_sandbox_api_token(thread_key) {
+                        spec = spec.env("CENTAUR_API_KEY", token);
+                    }
+                }
+                if let Some(resume_thread_id) =
+                    resume_thread_id.map(str::trim).filter(|id| !id.is_empty())
+                {
+                    spec = spec
+                        .env("CENTAUR_HARNESS_TRANSCRIPT_RESTORE", "1")
+                        .env("CENTAUR_RESUME_THREAD_ID", resume_thread_id);
+                    if harness == &HarnessType::Codex {
+                        spec = spec.env("CODEX_CONTINUE_THREAD_ID", resume_thread_id);
+                    }
                 }
                 for mount in mounts {
                     spec = spec.mount(mount.clone());
@@ -2249,6 +2325,25 @@ fn harness_server_subcommand(harness: &HarnessType) -> &'static str {
         HarnessType::Codex => "codex",
         HarnessType::ClaudeCode => "claude-code",
         HarnessType::Amp => "amp",
+    }
+}
+
+fn scoped_sandbox_api_token(thread_key: &ThreadKey) -> Option<String> {
+    let signing_key = env::var("SANDBOX_SIGNING_KEY")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())?;
+    match sandbox_token::mint_sandbox_token(thread_key, &signing_key) {
+        Ok(token) => Some(token),
+        Err(error) => {
+            warn!(
+                component = COMPONENT_SESSION_RUNTIME,
+                thread_key = %thread_key,
+                %error,
+                "failed to mint scoped sandbox API token"
+            );
+            None
+        }
     }
 }
 
@@ -4181,7 +4276,7 @@ mod tests {
     fn stdout_pump_max_line_error_is_stable() {
         assert_eq!(
             stdout_pump_error_message(&LinesCodecError::MaxLineLengthExceeded),
-            "sandbox stdout line exceeded maximum length of 8388608 bytes"
+            "sandbox stdout line exceeded codec maximum length"
         );
     }
 
@@ -4879,19 +4974,21 @@ mod tests {
 
         let spec = workload.spec(&thread_key, &HarnessType::Codex);
 
-        assert_eq!(spec.mounts.len(), 1);
-        assert_eq!(spec.mounts[0].target_path, "/home/agent/github");
-        assert!(spec.mounts[0].read_only);
-        assert_eq!(
-            spec.mounts[0].kind,
-            MountKind::Bind {
-                source_path: "/host/github".to_owned(),
-            }
-        );
+        assert!(spec.mounts.iter().any(|mount| {
+            mount.target_path == SANDBOX_STATE_DIR && mount.kind == MountKind::EmptyDir
+        }));
+        assert!(spec.mounts.iter().any(|mount| {
+            mount.target_path == "/home/agent/github"
+                && mount.read_only
+                && mount.kind
+                    == (MountKind::Bind {
+                        source_path: "/host/github".to_owned(),
+                    })
+        }));
     }
 
     #[test]
-    fn codex_workload_does_not_inject_stale_continue_thread_id() {
+    fn codex_workload_omits_continue_thread_id_without_resume_target() {
         let workload = SandboxWorkloadMode::codex_app_server(
             "centaur-agent:latest",
             Vec::new(),
@@ -4915,6 +5012,84 @@ mod tests {
                 .map(|env| env.value.as_str()),
             None
         );
+        assert_eq!(env_value(&spec, "CENTAUR_RESUME_THREAD_ID"), None);
+    }
+
+    #[test]
+    fn codex_workload_injects_continue_thread_id_for_resume_target() {
+        let workload = SandboxWorkloadMode::codex_app_server(
+            "centaur-agent:latest",
+            Vec::new(),
+            HarnessType::Codex,
+        );
+        let thread_key = ThreadKey::parse("chat:C123:1780000000.000000").unwrap();
+
+        let spec = workload.spec_with_resume_target(
+            &thread_key,
+            &HarnessType::Codex,
+            Some("codex-thread-1"),
+        );
+
+        assert_eq!(
+            env_value(&spec, "CODEX_CONTINUE_THREAD_ID"),
+            Some("codex-thread-1")
+        );
+        assert_eq!(
+            env_value(&spec, "CENTAUR_RESUME_THREAD_ID"),
+            Some("codex-thread-1")
+        );
+        assert_eq!(
+            env_value(&spec, "CENTAUR_HARNESS_TRANSCRIPT_RESTORE"),
+            Some("1")
+        );
+        assert_eq!(env_value(&spec, "AMP_CONTINUE_THREAD_ID"), None);
+    }
+
+    #[test]
+    fn claude_workload_sets_resume_target_without_codex_continue() {
+        let workload = SandboxWorkloadMode::codex_app_server(
+            "centaur-agent:latest",
+            Vec::new(),
+            HarnessType::Codex,
+        );
+        let thread_key = ThreadKey::parse("chat:C123:1780000000.000000").unwrap();
+
+        let spec = workload.spec_with_resume_target(
+            &thread_key,
+            &HarnessType::ClaudeCode,
+            Some("claude-thread-1"),
+        );
+
+        assert_eq!(
+            env_value(&spec, "CENTAUR_RESUME_THREAD_ID"),
+            Some("claude-thread-1")
+        );
+        assert_eq!(env_value(&spec, "CODEX_CONTINUE_THREAD_ID"), None);
+    }
+
+    #[test]
+    fn codex_workload_wires_ephemeral_harness_homes() {
+        let workload = SandboxWorkloadMode::codex_app_server(
+            "centaur-agent:latest",
+            Vec::new(),
+            HarnessType::Codex,
+        );
+        let thread_key = ThreadKey::parse("chat:C123:1780000000.000000").unwrap();
+
+        let spec = workload.spec(&thread_key, &HarnessType::Codex);
+
+        assert_eq!(
+            env_value(&spec, "CENTAUR_STATE_DIR"),
+            Some(SANDBOX_STATE_DIR)
+        );
+        assert_eq!(env_value(&spec, "CODEX_HOME"), Some(SANDBOX_CODEX_HOME));
+        assert_eq!(
+            env_value(&spec, "CLAUDE_CONFIG_DIR"),
+            Some(SANDBOX_CLAUDE_CONFIG_DIR)
+        );
+        assert!(spec.mounts.iter().any(|mount| {
+            mount.target_path == SANDBOX_STATE_DIR && mount.kind == MountKind::EmptyDir
+        }));
     }
 
     #[test]

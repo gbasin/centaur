@@ -454,6 +454,77 @@ if [ "$CODEX_AUTH_MODE" != "access_token" ]; then
     fi
 fi
 
+# ── Cold-start harness transcript restore ───────────────────────────────────
+restore_harness_transcript() {
+    case "${CENTAUR_HARNESS_TRANSCRIPT_RESTORE:-0}" in
+        1|true|True|TRUE|yes|Yes|YES|on|On|ON) ;;
+        *) return 0 ;;
+    esac
+
+    local harness="${CENTAUR_HARNESS_TYPE:-}"
+    if [ -z "$harness" ] && [ "${1:-}" = "harness-server" ]; then
+        harness="${2:-}"
+    fi
+
+    local atrium_harness target_path
+    case "$harness" in
+        claude|claude-code|claudecode)
+            atrium_harness="claude"
+            target_path="${CLAUDE_CONFIG_DIR:-$HOME_DIR/.claude}/projects/-home-agent-workspace/${CENTAUR_RESUME_THREAD_ID:-${CENTAUR_THREAD_KEY:-}}.jsonl"
+            ;;
+        codex)
+            atrium_harness="codex"
+            target_path="${CODEX_HOME:-$HOME_DIR/.codex}/sessions/$(date -u +%Y/%m/%d)/rollout-${CENTAUR_RESUME_THREAD_ID:-${CENTAUR_THREAD_KEY:-}}.jsonl"
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+
+    local session_id="${CENTAUR_THREAD_KEY:-}"
+    local resume_thread_id="${CENTAUR_RESUME_THREAD_ID:-$session_id}"
+    local base_url="${CENTAUR_API_URL:-}"
+    local api_key="${CENTAUR_API_KEY:-}"
+    if [ -z "$session_id" ] || [ -z "$resume_thread_id" ] || [ -z "$base_url" ] || [ -z "$api_key" ]; then
+        echo "harness transcript restore skipped: missing session id, resume id, CENTAUR_API_URL, or sandbox token" >&2
+        return 0
+    fi
+
+    local encoded_session
+    encoded_session="$(SESSION_ID="$session_id" python3 - <<'PYEOF'
+import os
+import urllib.parse
+
+print(urllib.parse.quote(os.environ["SESSION_ID"], safe=""))
+PYEOF
+)"
+    local url="${base_url%/}/agent/threads/${encoded_session}/harness-transcript?harness=${atrium_harness}"
+    local tmp status
+    tmp="$(mktemp)"
+    status="$(curl --noproxy '*' -sS -w '%{http_code}' -o "$tmp" -H "x-api-key: $api_key" "$url" || true)"
+    case "$status" in
+        200)
+            mkdir -p "$(dirname "$target_path")"
+            mv "$tmp" "$target_path"
+            chmod 600 "$target_path" 2>/dev/null || true
+            if [ "$atrium_harness" = "codex" ] && [ -z "${CODEX_CONTINUE_THREAD_ID:-}" ]; then
+                export CODEX_CONTINUE_THREAD_ID="$resume_thread_id"
+            fi
+            echo "harness transcript restored for $atrium_harness resume target $resume_thread_id" >&2
+            ;;
+        404)
+            rm -f "$tmp"
+            echo "harness transcript restore skipped: no transcript for $session_id/$atrium_harness" >&2
+            ;;
+        *)
+            rm -f "$tmp"
+            echo "harness transcript restore failed with HTTP $status for $session_id/$atrium_harness" >&2
+            ;;
+    esac
+}
+
+restore_harness_transcript "$@"
+
 # ── Background: artifact capture ────────────────────────────────────────────
 # Runs in-process rather than as a second container so it sees the exact /tmp
 # and workspace filesystem the harness writes to. Logs stay out of stdout,
@@ -462,12 +533,12 @@ case "${ARTIFACT_CAPTURE_ENABLED:-1}" in
     0|false|False|FALSE|no|No|NO|off|Off|OFF)
         ;;
     *)
-        if [ -n "${CENTAUR_API_URL:-}" ] && [ -n "${ARTIFACT_CAPTURE_API_KEY:-}" ]; then
+        if [ -n "${CENTAUR_API_URL:-}" ] && [ -n "${CENTAUR_API_KEY:-}" ]; then
             mkdir -p "$HOME_DIR/outputs"
             export ARTIFACT_CAPTURE_DIRS="${ARTIFACT_CAPTURE_DIRS:-$WORKSPACE_DIR:/tmp:$HOME_DIR/outputs:/var/tmp}"
             artifact-capture > /tmp/artifact-capture.log 2>&1 &
         else
-            echo "artifact capture disabled: missing CENTAUR_API_URL or ARTIFACT_CAPTURE_API_KEY" >&2
+            echo "artifact capture disabled: missing CENTAUR_API_URL or sandbox token" >&2
         fi
         ;;
 esac

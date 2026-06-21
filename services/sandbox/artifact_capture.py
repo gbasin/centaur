@@ -384,10 +384,10 @@ def main() -> int:
     if not env_bool("ARTIFACT_CAPTURE_ENABLED", True):
         return 0
     api_url = os.environ.get("CENTAUR_API_URL", "").strip()
-    api_key = os.environ.get("ARTIFACT_CAPTURE_API_KEY", "").strip()
+    api_key = os.environ.get("CENTAUR_API_KEY", "").strip()
     if not api_url or not api_key:
         logging.info(
-            "artifact capture disabled: missing CENTAUR_API_URL or ARTIFACT_CAPTURE_API_KEY"
+            "artifact capture disabled: missing CENTAUR_API_URL or sandbox token"
         )
         return 0
 

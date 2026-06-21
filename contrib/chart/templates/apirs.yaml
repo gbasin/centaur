@@ -257,6 +257,13 @@ spec:
             # with the harness the sandbox image CMD actually runs.
             - name: KUBERNETES_IRON_PROXY_HARNESS_ENGINE
               value: {{ .Values.sandbox.harnessEngine | quote }}
+            - name: ATRIUM_BASE_URL
+              value: {{ .Values.nodeSync.atriumBaseUrl | quote }}
+            - name: ATRIUM_CAPTURE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.nodeSync.apiKeySecret.name | quote }}
+                  key: {{ .Values.nodeSync.apiKeySecret.key | quote }}
 {{- $sandboxEnvList := list }}
 {{- if and .Values.repoCache.enabled (gt (len $skillDirs) 0) }}
 {{- $sandboxEnvList = append $sandboxEnvList (dict "name" "CENTAUR_SKILL_DIRS" "value" (join ":" $skillDirs)) }}
