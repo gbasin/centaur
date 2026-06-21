@@ -81,7 +81,7 @@ impl AtriumClient for HttpAtriumClient {
         // lets it pick the multipart/streaming path; x-artifact-size pre-sizes it).
         let mut req = self
             .agent
-            .post(&self.url(&format!("/artifacts/capture?path={}", enc(path))))
+            .post(&self.url(&format!("/artifacts/capture-stream?path={}", enc(path))))
             .set("x-api-key", &self.api_key)
             .set("content-type", "application/octet-stream")
             .set("x-artifact-stream", "1")
