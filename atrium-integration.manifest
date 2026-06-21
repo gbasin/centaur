@@ -1,0 +1,22 @@
+# atrium-integration.manifest
+# Reproducible definition of the atrium/integration deploy line.
+# Read by ./atrium-integration.sh. See ATRIUM_FORK.md for the model.
+#
+# base: the upstream ref the integration is rebuilt on. Prefer a release tag
+#       (e.g. centaur-0.1.61) over origin/main for stable, scheduled bumps.
+base = origin/main
+
+# Topics merged on top of base, in order. Columns:
+#   <branch>  <intent>  <upstream-pr>  <purpose>
+# intent ∈ { upstream-pending | undecided | fork-permanent }
+# A topic with a `-` PR has none yet; `never` = will not be upstreamed.
+#
+# branch                              intent            pr     purpose
+fork/gb/atrium-fork-meta              fork-permanent    never  ATRIUM_FORK.md + manifest + rebuild script (so a rebuild restores its own tooling)
+fork/gb/api-rs-hitl-relay             upstream-pending  #616   api-rs session cancel + HITL question-answer relay (carries the cancel topic)
+fork/gb/claude-sdk-hitl-bridge        undecided         -      Claude Code SDK bridge + per-execution OAuth env
+fork/gb/api-rs-artifact-capture       fork-permanent    never  sandbox artifact capture (api-rs routes + sandbox worker); carried, not upstreamed
+
+# Deploy-time config (iron-proxy disable, warm-pool size, etc.) is NOT a fork
+# topic — it lives in Atrium's infra/values.local.yaml, applied via
+# CENTAUR_EXTRA_VALUES at `just deploy`.
