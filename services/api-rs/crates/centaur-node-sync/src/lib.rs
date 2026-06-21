@@ -19,6 +19,7 @@ pub mod overlay;
 pub mod runtime;
 pub mod safety;
 pub mod tornread;
+pub mod wip;
 
 #[cfg(target_os = "linux")]
 pub mod fs_linux;

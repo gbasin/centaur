@@ -105,6 +105,47 @@ pub fn capture_sweep(
     out
 }
 
+/// One entry of the hydration manifest: the path + the version to materialize.
+#[derive(Debug, Clone)]
+pub struct HydrateEntry {
+    pub path: String,
+    pub seq: u64,
+}
+
+pub struct HydrateOutcome {
+    /// (path, base_seq) — the seed for `artifact_sync_state` + base-aware capture.
+    pub base_seqs: HashMap<String, u64>,
+    pub bytes_written: u64,
+    pub errors: Vec<(String, String)>,
+}
+
+/// Hydrate the artifact `lower` (Phase 5 / C-hydrate): for each manifest entry,
+/// fetch the version's bytes from Atrium and materialize them into the lowerdir
+/// tree (one file per path, creating parent dirs). The returned `base_seqs` IS the
+/// per-path base the capture sweep + adopt need. The live node reflinks from a
+/// node-local CAS cache instead of re-fetching; this is the correctness core.
+/// `write_file` is injected so the call flow is unit-tested without a real FS.
+pub fn hydrate_lower(
+    manifest: &[HydrateEntry],
+    client: &mut dyn AtriumClient,
+    mut write_file: impl FnMut(&str, &[u8]) -> Result<(), String>,
+) -> HydrateOutcome {
+    let mut out = HydrateOutcome { base_seqs: HashMap::new(), bytes_written: 0, errors: vec![] };
+    for entry in manifest {
+        match client.fetch_bytes(&entry.path, entry.seq) {
+            Ok(bytes) => match write_file(&entry.path, &bytes) {
+                Ok(()) => {
+                    out.bytes_written += bytes.len() as u64;
+                    out.base_seqs.insert(entry.path.clone(), entry.seq);
+                }
+                Err(e) => out.errors.push((entry.path.clone(), e)),
+            },
+            Err(e) => out.errors.push((entry.path.clone(), e)),
+        }
+    }
+    out
+}
+
 pub struct InboundPlan {
     /// Paths to write through `merged` with the fetched bytes (path, seq, bytes).
     pub to_write: Vec<(String, u64, Vec<u8>)>,
@@ -220,6 +261,40 @@ mod tests {
         let out = capture_sweep(&entries, &HashMap::new(), &reader, &mut echo, &mut client);
         assert_eq!(out.skipped_echo.len(), 1);
         assert!(out.captured.is_empty()); // not re-captured
+    }
+
+    #[test]
+    fn hydrate_lower_materializes_files_and_returns_base_seqs() {
+        let manifest = vec![
+            HydrateEntry { path: "proj-x/plan.md".into(), seq: 5 },
+            HydrateEntry { path: "shared/notes.md".into(), seq: 2 },
+        ];
+        let mut client = FakeClient::default();
+        let mut written: HashMap<String, Vec<u8>> = HashMap::new();
+        let out = hydrate_lower(&manifest, &mut client, |path, bytes| {
+            written.insert(path.to_string(), bytes.to_vec());
+            Ok(())
+        });
+        assert_eq!(out.base_seqs.get("proj-x/plan.md"), Some(&5));
+        assert_eq!(out.base_seqs.get("shared/notes.md"), Some(&2));
+        assert_eq!(written.len(), 2);
+        assert!(out.errors.is_empty());
+        assert!(out.bytes_written > 0);
+    }
+
+    #[test]
+    fn hydrate_lower_records_write_errors_without_aborting() {
+        let manifest = vec![
+            HydrateEntry { path: "ok.md".into(), seq: 1 },
+            HydrateEntry { path: "bad.md".into(), seq: 1 },
+        ];
+        let mut client = FakeClient::default();
+        let out = hydrate_lower(&manifest, &mut client, |path, _bytes| {
+            if path == "bad.md" { Err("disk full".into()) } else { Ok(()) }
+        });
+        assert_eq!(out.base_seqs.len(), 1); // only ok.md hydrated
+        assert_eq!(out.errors.len(), 1);
+        assert_eq!(out.errors[0].0, "bad.md");
     }
 
     #[test]
