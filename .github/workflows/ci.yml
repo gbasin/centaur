@@ -199,6 +199,29 @@ jobs:
           fi
           docker rm -f centaur-api-integration-test-postgres || true
 
+  node-sync-overlay:
+    name: node-sync overlay scanner validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: services/api-rs
+
+      # Real overlay + scan-demo: locks in the syscall proofs (whiteout→Delete,
+      # symlink→metadata-only, openat2 NO_SYMLINKS blocks the /etc/shadow escape).
+      # ubuntu-latest supports overlayfs on ext4 + passwordless sudo.
+      - name: Overlay scanner validation
+        working-directory: services/api-rs
+        run: bash crates/centaur-node-sync/ci/overlay-validation.sh
+
   slackbotv2-tests:
     name: Slackbot v2 tests
     runs-on: depot-ubuntu-24.04-16
@@ -269,6 +292,7 @@ jobs:
       - ci_changes
       - migration-order
       - rust-api
+      - node-sync-overlay
       - slackbotv2-tests
       - discordbot-checks
     timeout-minutes: 30
