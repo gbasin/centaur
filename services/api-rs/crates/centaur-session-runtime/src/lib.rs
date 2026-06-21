@@ -4605,7 +4605,10 @@ mod tests {
 
         assert_eq!(
             allowed,
-            vec![(CLAUDE_CODE_OAUTH_TOKEN_ENV.to_owned(), "oauth-token".to_owned())]
+            vec![(
+                CLAUDE_CODE_OAUTH_TOKEN_ENV.to_owned(),
+                "oauth-token".to_owned()
+            )]
         );
         assert!(
             validate_execution_environment(
@@ -4617,7 +4620,10 @@ mod tests {
         assert!(
             validate_execution_environment(
                 &HarnessType::Codex,
-                BTreeMap::from([(CLAUDE_CODE_OAUTH_TOKEN_ENV.to_owned(), "oauth-token".to_owned())]),
+                BTreeMap::from([(
+                    CLAUDE_CODE_OAUTH_TOKEN_ENV.to_owned(),
+                    "oauth-token".to_owned()
+                )]),
             )
             .is_err()
         );
