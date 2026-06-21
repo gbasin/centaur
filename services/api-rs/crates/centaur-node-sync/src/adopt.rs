@@ -31,6 +31,9 @@ pub struct RemoteChange {
     pub seq: u64,
     pub sha: Option<String>, // None = a delete tombstone
     pub status: RemoteStatus,
+    /// The producer commit-group this row belongs to (None = an ungrouped single
+    /// write). Lets the node re-group inbound rows into an atomic manifest (H10).
+    pub group_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,6 +123,7 @@ mod tests {
             seq,
             sha: sha.map(|s| s.to_string()),
             status,
+            group_id: None,
         }
     }
 
