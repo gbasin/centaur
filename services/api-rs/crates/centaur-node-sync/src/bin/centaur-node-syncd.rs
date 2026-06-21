@@ -42,6 +42,11 @@ fn main() {
             .unwrap_or_else(|| "repo".to_string())
     };
     let interval = env("NODE_SYNC_INTERVAL_SECS").parse::<u64>().unwrap_or(2);
+    // Per-session upper dirty-byte budget (#11). Default 2 GiB; the harness pauses
+    // the agent before ENOSPC when crossed.
+    let budget = centaur_node_sync::backpressure::Budget {
+        max_dirty_bytes: env("NODE_SYNC_DIRTY_BUDGET").parse::<u64>().unwrap_or(2 * 1024 * 1024 * 1024),
+    };
     let state_file = {
         let s = env("NODE_SYNC_STATE");
         if s.is_empty() {
@@ -170,6 +175,14 @@ fn main() {
             Ok(entries) => {
                 let reader = HardenedReader { upper: upper.clone() };
                 let base_seqs = state.base_seqs();
+                // Backpressure (#11): the upper is the agent's dirty set; warn the
+                // harness before it fills the node volume (ENOSPC mid-write).
+                let dirty = centaur_node_sync::backpressure::dirty_bytes(&entries);
+                if budget.over(dirty) {
+                    eprintln!("BACKPRESSURE: upper dirty {dirty}B OVER budget {}B — harness should pause the agent", budget.max_dirty_bytes);
+                } else if budget.near(dirty) {
+                    eprintln!("backpressure: upper dirty {dirty}B near budget {}B (headroom {}B)", budget.max_dirty_bytes, budget.headroom(dirty));
+                }
                 let out = capture_sweep(&entries, &base_seqs, &reader, &mut echo, &mut client);
                 for (path, seq, sha) in &out.captured {
                     state.sync_to(path, *seq, Some(sha.clone()), false);

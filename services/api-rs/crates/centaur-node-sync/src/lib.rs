@@ -14,6 +14,7 @@
 //! and exercised by the on-node integration tests.
 
 pub mod adopt;
+pub mod backpressure;
 pub mod cas;
 pub mod echo;
 pub mod http_client;
