@@ -123,9 +123,18 @@ fi
 #     chatgpt.com. The default auth.json (auth_mode: chatgpt) is always
 #     installed and the api-key login step is skipped so iron-proxy can
 #     inject the brokered Bearer + chatgpt-account-id headers.
+# CODEX_AUTH_JSON can provide a complete ChatGPT-mode Codex auth cache for
+# per-session subscription auth. When present it wins over CODEX_AUTH_MODE and
+# API-key placeholders.
 CODEX_AUTH_MODE="${CODEX_AUTH_MODE:-api_key}"
 mkdir -p "$HOME_DIR/.codex"
-if [ "$CODEX_AUTH_MODE" = "access_token" ] && [ -f /etc/centaur/codex-auth.default.json ]; then
+if [ -n "${CODEX_AUTH_JSON:-}" ]; then
+    printf '%s' "$CODEX_AUTH_JSON" > "$HOME_DIR/.codex/auth.json"
+    chmod 600 "$HOME_DIR/.codex/auth.json"
+    CODEX_AUTH_MODE="access_token"
+    export CODEX_AUTH_MODE
+    unset CODEX_AUTH_JSON OPENAI_API_KEY CODEX_API_KEY
+elif [ "$CODEX_AUTH_MODE" = "access_token" ] && [ -f /etc/centaur/codex-auth.default.json ]; then
     cp /etc/centaur/codex-auth.default.json "$HOME_DIR/.codex/auth.json"
     chmod 600 "$HOME_DIR/.codex/auth.json"
 elif [ ! -f "$HOME_DIR/.codex/auth.json" ] && [ -f /etc/centaur/codex-auth.default.json ]; then

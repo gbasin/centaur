@@ -44,6 +44,7 @@ const STEERING_STARTUP_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const STEERING_STARTUP_RETRY_TIMEOUT: Duration = Duration::from_secs(15);
 const COMPONENT_SESSION_RUNTIME: &str = "session_runtime";
 const CLAUDE_CODE_OAUTH_TOKEN_ENV: &str = "CLAUDE_CODE_OAUTH_TOKEN";
+const CODEX_AUTH_JSON_ENV: &str = "CODEX_AUTH_JSON";
 
 type SandboxSpecFactory = Arc<dyn Fn(&ThreadKey, &str, &HarnessType) -> SandboxSpec + Send + Sync>;
 type SessionInputSink = FramedWrite<SandboxWrite, LinesCodec>;
@@ -4028,14 +4029,19 @@ fn validate_execution_environment(
     if environment.is_empty() {
         return Ok(Vec::new());
     }
-    if harness_type != &HarnessType::ClaudeCode {
-        return Err(SessionRuntimeError::BadRequest(
-            "execution environment is only supported for claudecode sessions".to_owned(),
-        ));
-    }
+    let allowed_name = match harness_type {
+        HarnessType::ClaudeCode => CLAUDE_CODE_OAUTH_TOKEN_ENV,
+        HarnessType::Codex => CODEX_AUTH_JSON_ENV,
+        _ => {
+            return Err(SessionRuntimeError::BadRequest(
+                "execution environment is only supported for codex or claudecode sessions"
+                    .to_owned(),
+            ));
+        }
+    };
     let mut allowed = Vec::new();
     for (name, value) in environment {
-        if name != CLAUDE_CODE_OAUTH_TOKEN_ENV {
+        if name != allowed_name {
             return Err(SessionRuntimeError::BadRequest(format!(
                 "unsupported execution environment variable: {name}"
             )));
@@ -4652,8 +4658,8 @@ mod tests {
     }
 
     #[test]
-    fn execution_environment_allows_only_claude_oauth_token_for_claudecode() {
-        let allowed = validate_execution_environment(
+    fn execution_environment_allows_only_provider_auth_for_matching_harness() {
+        let claude_allowed = validate_execution_environment(
             &HarnessType::ClaudeCode,
             BTreeMap::from([(
                 CLAUDE_CODE_OAUTH_TOKEN_ENV.to_owned(),
@@ -4663,10 +4669,26 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            allowed,
+            claude_allowed,
             vec![(
                 CLAUDE_CODE_OAUTH_TOKEN_ENV.to_owned(),
                 "oauth-token".to_owned()
+            )]
+        );
+        let codex_allowed = validate_execution_environment(
+            &HarnessType::Codex,
+            BTreeMap::from([(
+                CODEX_AUTH_JSON_ENV.to_owned(),
+                r#"{"auth_mode":"chatgpt"}"#.to_owned(),
+            )]),
+        )
+        .unwrap();
+
+        assert_eq!(
+            codex_allowed,
+            vec![(
+                CODEX_AUTH_JSON_ENV.to_owned(),
+                r#"{"auth_mode":"chatgpt"}"#.to_owned()
             )]
         );
         assert!(
@@ -4683,6 +4705,13 @@ mod tests {
                     CLAUDE_CODE_OAUTH_TOKEN_ENV.to_owned(),
                     "oauth-token".to_owned()
                 )]),
+            )
+            .is_err()
+        );
+        assert!(
+            validate_execution_environment(
+                &HarnessType::ClaudeCode,
+                BTreeMap::from([(CODEX_AUTH_JSON_ENV.to_owned(), "{}".to_owned())]),
             )
             .is_err()
         );
