@@ -20,7 +20,7 @@ use axum::{
     routing::{any, get, post},
 };
 use base64::{Engine as _, engine::general_purpose};
-use centaur_session_core::ThreadKey;
+use centaur_session_core::{ThreadKey, sandbox_token};
 use centaur_session_runtime::{
     ExecuteSessionInput, HarnessConflictPolicy, SandboxRuntime, SessionRuntime,
 };
@@ -35,6 +35,7 @@ use centaur_workflows::{
 };
 use futures_util::{Stream, StreamExt};
 use hmac::{Hmac, Mac};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tower_http::trace::TraceLayer;
@@ -158,6 +159,10 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
         )
         .route("/api/session/{thread_key}/events", get(stream_events))
         .route("/agent/threads/{thread_key}/events", get(stream_events))
+        .route(
+            "/agent/threads/{thread_key}/harness-transcript",
+            get(get_harness_transcript),
+        )
         .route(
             "/agent/executions/{execution_id}/artifacts",
             post(capture_artifact).layer(DefaultBodyLimit::max(MAX_ARTIFACT_UPLOAD_BYTES)),
@@ -435,9 +440,9 @@ async fn capture_artifact(
     Path(execution_id): Path<String>,
     multipart: Multipart,
 ) -> Result<Json<Value>, ApiError> {
-    enforce_artifact_api_key(&headers)?;
+    let claims = verify_sandbox_token(&headers)?;
     let thread_key = state.runtime()?.execution_thread_key(&execution_id).await?;
-    enforce_sandbox_thread_scope(&headers, &thread_key)?;
+    enforce_sandbox_thread_scope(&claims, &thread_key)?;
     let input = parse_artifact_multipart(multipart).await?;
     let result = state
         .runtime()?
@@ -485,6 +490,59 @@ async fn get_artifact(
     headers.insert(
         header::CONTENT_DISPOSITION,
         HeaderValue::from_static("attachment"),
+    );
+    Ok(response)
+}
+
+#[derive(Debug, Deserialize)]
+struct HarnessTranscriptQuery {
+    harness: String,
+}
+
+async fn get_harness_transcript(
+    headers: HeaderMap,
+    Path(raw_thread_key): Path<String>,
+    Query(query): Query<HarnessTranscriptQuery>,
+) -> Result<Response, ApiError> {
+    let thread_key = ThreadKey::try_from(raw_thread_key)?;
+    let claims = verify_sandbox_token(&headers)?;
+    enforce_sandbox_thread_scope(&claims, &thread_key)?;
+    let harness = normalize_atrium_harness(&query.harness)?;
+    let (base_url, api_key) = configured_atrium_proxy()?;
+    let url = format!(
+        "{}/api/internal/sessions/{}/harness-transcript?harness={}",
+        base_url.trim_end_matches('/'),
+        urlencoding::encode(thread_key.as_str()),
+        harness
+    );
+    let upstream = reqwest::Client::new()
+        .get(url)
+        .header("x-api-key", api_key)
+        .send()
+        .await
+        .map_err(|error| {
+            ApiError::BadGateway(format!("atrium transcript fetch failed: {error}"))
+        })?;
+    let status = upstream.status();
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Err(ApiError::NotFound(
+            "harness transcript not found".to_owned(),
+        ));
+    }
+    if !status.is_success() {
+        return Err(ApiError::BadGateway(format!(
+            "atrium transcript fetch failed with HTTP {}",
+            status.as_u16()
+        )));
+    }
+    let bytes = upstream.bytes().await.map_err(|error| {
+        ApiError::BadGateway(format!("atrium transcript body read failed: {error}"))
+    })?;
+    let mut response = Body::from(bytes).into_response();
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/jsonl"),
     );
     Ok(response)
 }
@@ -595,6 +653,23 @@ fn required_part(value: Option<String>, name: &str) -> Result<String, ApiError> 
         .ok_or_else(|| ApiError::BadRequest(format!("missing artifact field {name}")))
 }
 
+fn verify_sandbox_token(
+    headers: &HeaderMap,
+) -> Result<sandbox_token::SandboxTokenClaims, ApiError> {
+    let Some(token) = presented_api_key(headers) else {
+        return Err(ApiError::Unauthorized("missing API key".to_owned()));
+    };
+    let signing_key = env::var("SANDBOX_SIGNING_KEY")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            ApiError::Unauthorized("sandbox token signing key is not configured".to_owned())
+        })?;
+    sandbox_token::verify_sandbox_token(&token, &signing_key)
+        .map_err(|_| ApiError::Unauthorized("invalid sandbox token".to_owned()))
+}
+
 fn enforce_artifact_api_key(headers: &HeaderMap) -> Result<(), ApiError> {
     let Some(actual) = presented_api_key(headers) else {
         return Err(ApiError::Unauthorized("missing API key".to_owned()));
@@ -633,30 +708,56 @@ fn presented_api_key(headers: &HeaderMap) -> Option<String> {
 
 fn configured_artifact_api_keys() -> Vec<String> {
     // Dedicated, narrowly-scoped credential ONLY. Deliberately does not accept
-    // the broad control-plane key (CENTAUR_API_KEY) or bot keys: a leaked
-    // artifact key must not reach other control-plane routes, and sandboxes are
-    // handed this key — never a control-plane key.
-    env::var("ARTIFACT_CAPTURE_API_KEY")
-        .ok()
+    // bot keys: Atrium/server-side fetches use this key, while sandbox writes
+    // use scoped sandbox tokens.
+    ["ARTIFACT_CAPTURE_API_KEY", "ATRIUM_CAPTURE_API_KEY"]
+        .into_iter()
+        .filter_map(|name| env::var(name).ok())
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
-        .into_iter()
-        .collect()
+        .fold(Vec::new(), |mut keys, key| {
+            if !keys.iter().any(|existing| existing == &key) {
+                keys.push(key);
+            }
+            keys
+        })
 }
 
 fn enforce_sandbox_thread_scope(
-    headers: &HeaderMap,
+    claims: &sandbox_token::SandboxTokenClaims,
     thread_key: &ThreadKey,
 ) -> Result<(), ApiError> {
-    match header_value(headers, "x-centaur-thread-key") {
-        Some(value) if value.trim() == thread_key.as_str() => Ok(()),
-        Some(_) => Err(ApiError::Unauthorized(
+    if claims.thread_key == *thread_key {
+        Ok(())
+    } else {
+        Err(ApiError::Unauthorized(
             "API key is not scoped to this thread".to_owned(),
-        )),
-        None => Err(ApiError::Unauthorized(
-            "missing sandbox thread scope".to_owned(),
+        ))
+    }
+}
+
+fn normalize_atrium_harness(value: &str) -> Result<&'static str, ApiError> {
+    match value.trim() {
+        "claude" | "claude-code" | "claudecode" => Ok("claude"),
+        "codex" => Ok("codex"),
+        _ => Err(ApiError::BadRequest(
+            "harness must be claude or codex".to_owned(),
         )),
     }
+}
+
+fn configured_atrium_proxy() -> Result<(String, String), ApiError> {
+    let base_url = env::var("ATRIUM_BASE_URL")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ApiError::Internal("ATRIUM_BASE_URL is not configured".to_owned()))?;
+    let api_key = env::var("ATRIUM_CAPTURE_API_KEY")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ApiError::Internal("ATRIUM_CAPTURE_API_KEY is not configured".to_owned()))?;
+    Ok((base_url, api_key))
 }
 
 async fn create_workflow_run(

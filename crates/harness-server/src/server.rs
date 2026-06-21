@@ -171,7 +171,15 @@ pub(crate) fn run_app_server<H: HarnessServer>(harness: &H) -> Result<()> {
 fn initial_blocks_thread_state<H: HarnessServer>(harness: &H) -> Result<ThreadState> {
     let cwd = env::current_dir()?;
     let params = ThreadStartParams::default();
-    Ok(harness.thread_state(&params, cwd))
+    let mut state = harness.thread_state(&params, cwd);
+    if let Some(thread_id) = non_empty(env::var("CENTAUR_THREAD_KEY").ok().as_deref()) {
+        state.id = thread_id.to_owned();
+    }
+    if let Some(thread_id) = non_empty(env::var("CENTAUR_RESUME_THREAD_ID").ok().as_deref()) {
+        state.id = thread_id.to_owned();
+        state.harness_session_id = Some(thread_id.to_owned());
+    }
+    Ok(state)
 }
 
 fn run_blocks_turn<H: HarnessServer, W: Write>(
@@ -1162,6 +1170,45 @@ mod tests {
             env::set_var("CENTAUR_UPLOADS_DIR", &path);
         }
         path
+    }
+
+    #[test]
+    fn blocks_thread_state_uses_centaur_thread_key_and_resume_target() {
+        let previous_thread_key = env::var_os("CENTAUR_THREAD_KEY");
+        let previous_resume_thread_id = env::var_os("CENTAUR_RESUME_THREAD_ID");
+        unsafe {
+            env::set_var("CENTAUR_THREAD_KEY", "slack:C123:1780000000.000000");
+            env::remove_var("CENTAUR_RESUME_THREAD_ID");
+        }
+
+        let state = initial_blocks_thread_state(&ClaudeCodeHarness).expect("initial state");
+
+        assert_eq!(state.id, "slack:C123:1780000000.000000");
+        assert_eq!(state.harness_session_id, None);
+
+        unsafe {
+            env::set_var("CENTAUR_RESUME_THREAD_ID", "claude-session-1");
+        }
+        let resumed = initial_blocks_thread_state(&ClaudeCodeHarness).expect("resumed state");
+
+        assert_eq!(resumed.id, "claude-session-1");
+        assert_eq!(
+            resumed.harness_session_id.as_deref(),
+            Some("claude-session-1")
+        );
+
+        unsafe {
+            if let Some(value) = previous_thread_key {
+                env::set_var("CENTAUR_THREAD_KEY", value);
+            } else {
+                env::remove_var("CENTAUR_THREAD_KEY");
+            }
+            if let Some(value) = previous_resume_thread_id {
+                env::set_var("CENTAUR_RESUME_THREAD_ID", value);
+            } else {
+                env::remove_var("CENTAUR_RESUME_THREAD_ID");
+            }
+        }
     }
 
     #[test]

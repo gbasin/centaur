@@ -29,12 +29,17 @@ mod tests {
         ObservedSandbox, SandboxBackend, SandboxError, SandboxHandle, SandboxId, SandboxIo,
         SandboxResult, SandboxSpec, SandboxStatus,
     };
-    use centaur_session_core::{HarnessType, ThreadKey};
+    use centaur_session_core::{HarnessType, ThreadKey, sandbox_token};
     use centaur_session_runtime::SandboxRuntime;
     use centaur_session_sqlx::PgSessionStore;
     use serde_json::{Value, json};
     use sha2::{Digest, Sha256};
     use sqlx::PgPool;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+        sync::oneshot,
+    };
     use tower::ServiceExt;
 
     use super::{AppState, build_router_with_app_state, build_router_with_runtime};
@@ -287,13 +292,14 @@ mod tests {
         let Some((store, app, thread_key, execution_id)) = artifact_test_app().await else {
             return;
         };
-        set_artifact_test_key();
+        set_sandbox_test_key();
+        let token = sandbox_test_token(&thread_key);
         let body = b"hello artifact".to_vec();
         let sha256 = sha256_hex(&body);
         let request = artifact_upload_request(
             &execution_id,
             thread_key.as_str(),
-            "test-artifact-key",
+            &token,
             &sha256,
             Some(&body),
         );
@@ -304,7 +310,7 @@ mod tests {
             .oneshot(artifact_upload_request(
                 &execution_id,
                 thread_key.as_str(),
-                "test-artifact-key",
+                &token,
                 &sha256,
                 Some(&body),
             ))
@@ -338,7 +344,9 @@ mod tests {
         let Some((_store, app, thread_key, execution_id)) = artifact_test_app().await else {
             return;
         };
+        set_sandbox_test_key();
         set_artifact_test_key();
+        let token = sandbox_test_token(&thread_key);
         let body = b"hello artifact".to_vec();
         let sha256 = sha256_hex(&body);
         let response = app
@@ -346,7 +354,7 @@ mod tests {
             .oneshot(artifact_upload_request(
                 &execution_id,
                 thread_key.as_str(),
-                "test-artifact-key",
+                &token,
                 &sha256,
                 Some(&body),
             ))
@@ -381,7 +389,7 @@ mod tests {
         let Some((_store, app, thread_key, execution_id)) = artifact_test_app().await else {
             return;
         };
-        set_artifact_test_key();
+        set_sandbox_test_key();
         let body = b"hello artifact".to_vec();
         let sha256 = sha256_hex(&body);
         let response = app
@@ -402,13 +410,14 @@ mod tests {
         let Some((store, app, thread_key, execution_id)) = artifact_test_app().await else {
             return;
         };
-        set_artifact_test_key();
+        set_sandbox_test_key();
+        let token = sandbox_test_token(&thread_key);
         let sha256 = sha256_hex(b"large artifact");
         let response = app
             .oneshot(artifact_upload_request(
                 &execution_id,
                 thread_key.as_str(),
-                "test-artifact-key",
+                &token,
                 &sha256,
                 None,
             ))
@@ -443,7 +452,8 @@ mod tests {
         let Some((store, app, thread_key, execution_id)) = artifact_test_app().await else {
             return;
         };
-        set_artifact_test_key();
+        set_sandbox_test_key();
+        let token = sandbox_test_token(&thread_key);
         let body = b"hello artifact".to_vec();
         // Valid 64-hex digest that does NOT match the uploaded bytes.
         let wrong_sha256 = sha256_hex(b"different content");
@@ -451,7 +461,7 @@ mod tests {
             .oneshot(artifact_upload_request(
                 &execution_id,
                 thread_key.as_str(),
-                "test-artifact-key",
+                &token,
                 &wrong_sha256,
                 Some(&body),
             ))
@@ -468,6 +478,76 @@ mod tests {
                 .iter()
                 .all(|event| event.event_type != "artifact.captured")
         );
+    }
+
+    #[tokio::test]
+    async fn harness_transcript_proxy_uses_scoped_sandbox_token_and_server_side_key() {
+        set_sandbox_test_key();
+        unsafe {
+            std::env::set_var("ATRIUM_CAPTURE_API_KEY", "atrium-server-key");
+        }
+        let (base_url, request_rx) = spawn_one_shot_http(
+            200,
+            "application/jsonl",
+            b"{\"type\":\"assistant\"}\n".to_vec(),
+        )
+        .await;
+        unsafe {
+            std::env::set_var("ATRIUM_BASE_URL", base_url);
+        }
+        let thread_key = ThreadKey::parse("slack:C123:123.456").unwrap();
+        let token = sandbox_test_token(&thread_key);
+        let app = build_router_with_app_state(AppState::unready());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(
+                        "/agent/threads/slack%3AC123%3A123.456/harness-transcript?harness=claude-code",
+                    )
+                    .header("x-api-key", token.as_str())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/jsonl"
+        );
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(bytes.as_ref(), b"{\"type\":\"assistant\"}\n");
+        let request = request_rx.await.unwrap();
+        assert!(request.starts_with(
+            "GET /api/internal/sessions/slack%3AC123%3A123.456/harness-transcript?harness=claude "
+        ));
+        assert!(request.contains("\r\nx-api-key: atrium-server-key\r\n"));
+        assert!(!request.contains(token.as_str()));
+    }
+
+    #[tokio::test]
+    async fn harness_transcript_proxy_rejects_cross_thread_sandbox_token() {
+        set_sandbox_test_key();
+        let token =
+            sandbox_test_token(&ThreadKey::parse("slack:C123:123.456").expect("thread key"));
+        let app = build_router_with_app_state(AppState::unready());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/agent/threads/slack%3AC999%3A999.000/harness-transcript?harness=codex")
+                    .header("x-api-key", token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     async fn artifact_test_app() -> Option<(PgSessionStore, axum::Router, ThreadKey, String)> {
@@ -572,6 +652,41 @@ mod tests {
         unsafe {
             std::env::set_var("ARTIFACT_CAPTURE_API_KEY", "test-artifact-key");
         }
+    }
+
+    fn set_sandbox_test_key() {
+        unsafe {
+            std::env::set_var("SANDBOX_SIGNING_KEY", "test-sandbox-signing-key");
+        }
+    }
+
+    fn sandbox_test_token(thread_key: &ThreadKey) -> String {
+        sandbox_token::mint_sandbox_token(thread_key, "test-sandbox-signing-key").unwrap()
+    }
+
+    async fn spawn_one_shot_http(
+        status: u16,
+        content_type: &str,
+        body: Vec<u8>,
+    ) -> (String, oneshot::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = oneshot::channel();
+        let content_type = content_type.to_owned();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0_u8; 8192];
+            let n = stream.read(&mut buf).await.unwrap();
+            let _ = tx.send(String::from_utf8_lossy(&buf[..n]).into_owned());
+            let reason = if status == 200 { "OK" } else { "Not Found" };
+            let response = format!(
+                "HTTP/1.1 {status} {reason}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            stream.write_all(&body).await.unwrap();
+        });
+        (format!("http://{addr}"), rx)
     }
 
     #[tokio::test]

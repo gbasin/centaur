@@ -911,12 +911,6 @@ impl SandboxArgs {
                 .unwrap_or("http://api:8000")
                 .to_owned(),
         )];
-        if let Some(api_key) = artifact_capture_api_key_from_env() {
-            // Hand the sandbox the dedicated artifact key under its own name,
-            // never the control-plane CENTAUR_API_KEY.
-            envs.push(("ARTIFACT_CAPTURE_API_KEY".to_owned(), api_key));
-        }
-
         // Single source of truth: propagate this control plane's harness auth
         // modes into the sandbox so the agent's auth.json matches the
         // credential the egress proxy injects — api-rs reads the same
@@ -1803,13 +1797,6 @@ fn default_workflow_host_path() -> String {
         .to_string()
 }
 
-fn artifact_capture_api_key_from_env() -> Option<String> {
-    // Only the dedicated key enables capture. We never fall back to the
-    // control-plane CENTAUR_API_KEY or bot keys, so the sandbox cannot be
-    // handed a broadly-privileged credential.
-    clean_optional_value(env::var("ARTIFACT_CAPTURE_API_KEY").ok().as_deref())
-}
-
 fn harness_fragment_engine_name(engine: &HarnessType) -> &'static str {
     match engine {
         HarnessType::Codex => "codex",
@@ -2310,6 +2297,58 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn codex_app_server_env_template_does_not_forward_atrium_credentials() {
+        let args = Args::try_parse_from([
+            "centaur-api-server",
+            "--database-url",
+            "postgres://postgres:postgres@localhost/centaur",
+            "--session-sandbox-workload",
+            "codex-app-server",
+        ])
+        .unwrap();
+        let previous = env::var_os("ATRIUM_BASE_URL");
+        let previous_key = env::var_os("ATRIUM_CAPTURE_API_KEY");
+        let previous_artifact_key = env::var_os("ARTIFACT_CAPTURE_API_KEY");
+        unsafe {
+            env::set_var("ATRIUM_BASE_URL", "http://atrium-server.atrium.svc:8080");
+            env::set_var("ATRIUM_CAPTURE_API_KEY", "server-side-key");
+            env::set_var("ARTIFACT_CAPTURE_API_KEY", "legacy-server-side-key");
+        }
+
+        let envs = args.sandbox.codex_app_server_env_template().unwrap();
+
+        assert!(!envs.iter().any(|(name, _)| name == "ATRIUM_BASE_URL"));
+        assert!(
+            !envs
+                .iter()
+                .any(|(name, _)| name == "ATRIUM_CAPTURE_API_KEY")
+        );
+        assert!(
+            !envs
+                .iter()
+                .any(|(name, _)| name == "ARTIFACT_CAPTURE_API_KEY")
+        );
+
+        unsafe {
+            if let Some(value) = previous {
+                env::set_var("ATRIUM_BASE_URL", value);
+            } else {
+                env::remove_var("ATRIUM_BASE_URL");
+            }
+            if let Some(value) = previous_key {
+                env::set_var("ATRIUM_CAPTURE_API_KEY", value);
+            } else {
+                env::remove_var("ATRIUM_CAPTURE_API_KEY");
+            }
+            if let Some(value) = previous_artifact_key {
+                env::set_var("ARTIFACT_CAPTURE_API_KEY", value);
+            } else {
+                env::remove_var("ARTIFACT_CAPTURE_API_KEY");
+            }
+        }
     }
 
     #[test]
