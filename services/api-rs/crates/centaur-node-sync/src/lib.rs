@@ -19,6 +19,7 @@ pub mod backpressure;
 pub mod cas;
 pub mod echo;
 pub mod http_client;
+pub mod manifest;
 pub mod overlay;
 pub mod quiesce;
 pub mod runtime;

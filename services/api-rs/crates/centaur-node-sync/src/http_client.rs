@@ -164,7 +164,19 @@ impl AtriumClient for HttpAtriumClient {
                         .and_then(|s| s.as_str())
                         .unwrap_or("normal"),
                 );
-                out.push((path, RemoteChange { seq, sha, status }));
+                let group_id = row
+                    .get("group_id")
+                    .and_then(|g| g.as_str())
+                    .map(|g| g.to_string());
+                out.push((
+                    path,
+                    RemoteChange {
+                        seq,
+                        sha,
+                        status,
+                        group_id,
+                    },
+                ));
             }
         }
         Ok((out, next))

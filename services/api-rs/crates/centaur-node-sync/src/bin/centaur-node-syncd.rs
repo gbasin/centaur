@@ -98,6 +98,34 @@ fn main() {
         Ok(())
     }
 
+    // Two-phase write-through for an ATOMIC manifest (H10): stage all entries to
+    // temp, then commit (rename) all — so a multi-file group lands all-or-nothing.
+    fn staged_tmp(merged: &Path, rel: &str) -> PathBuf {
+        let mut s = merged.join(rel).into_os_string();
+        s.push(".nodesync.tmp");
+        PathBuf::from(s)
+    }
+    fn stage_through_merged(merged: &Path, rel: &str, bytes: &[u8]) -> Result<(), String> {
+        use std::os::unix::fs::chown;
+        let tmp = staged_tmp(merged, rel);
+        if let Some(parent) = tmp.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        std::fs::write(&tmp, bytes).map_err(|e| e.to_string())?;
+        let _ = chown(&tmp, Some(1001), Some(1001));
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o664));
+        }
+        Ok(())
+    }
+    fn commit_through_merged(merged: &Path, rel: &str) -> Result<(), String> {
+        std::fs::rename(staged_tmp(merged, rel), merged.join(rel)).map_err(|e| e.to_string())
+    }
+    fn abort_staged(merged: &Path, rel: &str) {
+        let _ = std::fs::remove_file(staged_tmp(merged, rel));
+    }
+
     let mut client = HttpAtriumClient::new(&base_url, &api_key, &session);
     let mut echo = EchoGuard::new();
     let lease = LeaseGate::new(); // harness flips this in prod; empty = all quiesced
@@ -157,23 +185,77 @@ fn main() {
         match client.poll_changes(&state.cursor) {
             Ok((changes, next)) => {
                 if !changes.is_empty() {
+                    use centaur_node_sync::manifest::{
+                        ManifestApply, apply_manifest_atomic, partition_manifests,
+                    };
+                    use std::collections::HashMap;
+
                     let plan = inbound_sweep(&changes, state.locals(), &mut echo, &mut client);
-                    let (written, deferred) =
-                        apply_quiesced_writes(plan.to_write, &lease, |rel, bytes| {
+
+                    // H10: re-group adopt-ready writes by their producer commit-group so
+                    // a coherent multi-file change lands ALL-OR-NOTHING; ungrouped rows
+                    // stay on the existing per-path quiesce path.
+                    let mut group_size: HashMap<String, usize> = HashMap::new();
+                    for (_p, rc) in &changes {
+                        if let Some(g) = &rc.group_id {
+                            *group_size.entry(g.clone()).or_default() += 1;
+                        }
+                    }
+                    let tagged = plan
+                        .to_write
+                        .into_iter()
+                        .map(|(path, seq, bytes)| {
+                            let (gid, sha) = changes
+                                .iter()
+                                .find(|(p, rc)| p == &path && rc.seq == seq)
+                                .map(|(_, rc)| (rc.group_id.clone(), rc.sha.clone()))
+                                .unwrap_or((None, None));
+                            (path, seq, gid, sha, bytes)
+                        })
+                        .collect();
+                    let part = partition_manifests(tagged, &group_size);
+
+                    let mut adopted = 0usize;
+                    // loose single writes — the existing per-path quiesce path.
+                    let (written, loose_deferred) =
+                        apply_quiesced_writes(part.loose, &lease, |rel, bytes| {
                             write_through_merged(&merged, rel, bytes)
                         });
                     for (path, seq) in &written {
-                        // the adopted version's sha == the change row's sha → base_sha
                         let sha = changes
                             .iter()
                             .find(|(p, rc)| p == path && rc.seq == *seq)
                             .and_then(|(_, rc)| rc.sha.clone());
                         state.sync_to(path, *seq, sha, true);
+                        adopted += 1;
+                    }
+                    // atomic groups — all-or-nothing through the staged two-phase write.
+                    let mut group_deferred = 0usize;
+                    for m in &part.manifests {
+                        match apply_manifest_atomic(
+                            m,
+                            &lease,
+                            |rel, bytes| stage_through_merged(&merged, rel, bytes),
+                            |rel| commit_through_merged(&merged, rel),
+                            |rel| abort_staged(&merged, rel),
+                        ) {
+                            ManifestApply::Applied(entries) => {
+                                for (path, seq, sha) in entries {
+                                    state.sync_to(&path, seq, sha, true);
+                                    adopted += 1;
+                                }
+                            }
+                            ManifestApply::Deferred(reason) => {
+                                group_deferred += 1;
+                                eprintln!("  group {} deferred: {reason}", m.group_id);
+                            }
+                        }
                     }
                     println!(
-                        "inbound: {} adopted, {} deferred, {} reconcile, {} conflicts",
-                        written.len(),
-                        deferred.len(),
+                        "inbound: {adopted} adopted ({} groups), {} loose-deferred, {group_deferred} group-deferred, {} incomplete, {} reconcile, {} conflicts",
+                        part.manifests.len(),
+                        loose_deferred.len(),
+                        part.deferred_incomplete.len(),
                         plan.to_reconcile.len(),
                         plan.conflicts.len()
                     );

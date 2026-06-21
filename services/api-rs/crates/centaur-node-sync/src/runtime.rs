@@ -527,6 +527,7 @@ mod tests {
                     seq: 6,
                     sha: Some("v6".into()),
                     status: RemoteStatus::Normal,
+                    group_id: None,
                 },
             ),
             (
@@ -535,6 +536,7 @@ mod tests {
                     seq: 6,
                     sha: Some("v6".into()),
                     status: RemoteStatus::Normal,
+                    group_id: None,
                 },
             ),
         ];
