@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::adopt::{decide_adopt, AdoptAction, LocalState, RemoteChange};
+use crate::adopt::{decide_adopt, AdoptAction, LocalState, RemoteChange, RemoteStatus};
 use crate::echo::EchoGuard;
 use crate::overlay::{OverlayOp, RawEntry};
 use crate::scan_to_ops;
@@ -21,6 +21,23 @@ pub trait AtriumClient {
     fn post_delete(&mut self, path: &str, base_seq: u64) -> Result<u64, String>;
     /// Fetch the bytes of a remote version (for an inbound adopt).
     fn fetch_bytes(&mut self, path: &str, seq: u64) -> Result<Vec<u8>, String>;
+    /// Poll the gap-free change-feed past `cursor` → (path, remote-change) rows +
+    /// the next cursor. Default: nothing (the live HTTP impl overrides it).
+    fn poll_changes(
+        &mut self,
+        _cursor: &str,
+    ) -> Result<(Vec<(String, RemoteChange)>, String), String> {
+        Ok((vec![], _cursor.to_string()))
+    }
+}
+
+/// Parse a change-feed JSON row's status into the adopt enum.
+pub fn status_of(s: &str) -> RemoteStatus {
+    if s == "conflict" {
+        RemoteStatus::Conflict
+    } else {
+        RemoteStatus::Normal
+    }
 }
 
 /// Read the current bytes of an upper path (the live impl is openat2-hardened +

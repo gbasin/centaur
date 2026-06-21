@@ -14,8 +14,11 @@
 //! and exercised by the on-node integration tests.
 
 pub mod adopt;
+pub mod cas;
 pub mod echo;
+pub mod http_client;
 pub mod overlay;
+pub mod quiesce;
 pub mod runtime;
 pub mod safety;
 pub mod tornread;
