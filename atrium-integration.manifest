@@ -14,6 +14,7 @@ base = origin/main
 # branch                              intent            pr     purpose
 fork/gb/atrium-fork-meta              fork-permanent    never  ATRIUM_FORK.md + manifest + rebuild script (so a rebuild restores its own tooling)
 fork/gb/api-rs-hitl-relay             upstream-pending  #616   api-rs session cancel + HITL question-answer relay (carries the cancel topic)
+fork/gb/claude-sdk-hitl-bridge        undecided         -      Claude Code SDK bridge + per-execution OAuth env
 fork/gb/api-rs-artifact-capture       fork-permanent    never  sandbox artifact capture (api-rs routes + sandbox worker); carried, not upstreamed
 
 # Deploy-time config (iron-proxy disable, warm-pool size, etc.) is NOT a fork
