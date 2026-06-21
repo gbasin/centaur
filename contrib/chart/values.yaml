@@ -452,3 +452,20 @@ nodeSync:
   apiKeySecret:
     name: centaur-infra-env
     key: ARTIFACT_CAPTURE_API_KEY
+  # VM-per-tenant (R2 / §8B #19) — NOT-VALIDATED-ON-MACOS. Off by default: the
+  # single global DaemonSet above runs. Enable to render ONE DaemonSet per tenant,
+  # node-pinned + optionally under a microVM runtimeClass. See the per-tenant
+  # templates + notes/sync-hardening-plan.md. Example in values-per-tenant.example.yaml.
+  perTenant:
+    enabled: false
+    tenants: []
+    # - id: tenant-001
+    #   namespace: tenant-001        # default: release namespace
+    #   nodeSelector value is centaur.io/tenant=<id> (structural #19 boundary)
+    #   runtimeClassName: kata       # omit for shared-kernel
+    microVM:
+      enabled: false
+      runtimeClasses: []
+      # - name: kata
+      #   handler: kata
+      #   overhead: { cpu: "250m", memory: "160Mi" }
