@@ -93,8 +93,10 @@ pub(crate) fn run_blocks_app_server<H: HarnessServer>(harness: &H) -> Result<()>
                 input,
                 client_user_message_id,
                 model,
-                // Reasoning effort only applies to the codex harness; the
-                // emulated (claude/amp) app-server has no equivalent knob.
+                // Provider selection and reasoning effort only apply to the codex
+                // harness; the emulated (claude/amp) app-server has no equivalent
+                // knob (its provider is fixed at thread start from session params).
+                provider: _,
                 reasoning: _,
             }) => {
                 if let Some(model) = model {
@@ -225,6 +227,7 @@ pub(crate) enum BlocksCommand {
         input: Vec<UserInput>,
         client_user_message_id: Option<String>,
         model: Option<String>,
+        provider: Option<String>,
         reasoning: Option<String>,
     },
     QuestionAnswer {
@@ -326,6 +329,8 @@ struct BlocksLine {
     client_user_message_id: Option<String>,
     #[serde(default)]
     model: Option<String>,
+    #[serde(default)]
+    provider: Option<String>,
     #[serde(default)]
     reasoning: Option<String>,
     #[serde(rename = "attachmentId", default)]
@@ -440,6 +445,10 @@ pub(crate) fn parse_blocks_line_with_state(
                     .model
                     .map(|model| model.trim().to_owned())
                     .filter(|model| !model.is_empty()),
+                provider: parsed
+                    .provider
+                    .map(|provider| provider.trim().to_owned())
+                    .filter(|provider| !provider.is_empty()),
                 reasoning: parsed
                     .reasoning
                     .map(|reasoning| reasoning.trim().to_owned())
@@ -1196,10 +1205,11 @@ fn drain_active_blocks_input<H: HarnessServer, W: Write>(
                 input,
                 client_user_message_id,
                 model,
+                provider,
                 reasoning,
             }) => {
-                if model.is_some() || reasoning.is_some() {
-                    eprintln!("blocks active steering ignored model/reasoning overrides");
+                if model.is_some() || provider.is_some() || reasoning.is_some() {
+                    eprintln!("blocks active steering ignored model/provider/reasoning overrides");
                 }
                 process.stdin.write_all(&harness.stdin_for_steer(&input)?)?;
                 process.stdin.flush()?;
@@ -1460,6 +1470,24 @@ mod tests {
             panic!("expected user command");
         };
         assert_eq!(model, None);
+    }
+
+    #[test]
+    fn parses_blocks_user_line_with_provider_override() {
+        let line = r#"{"type":"user","thread_key":"web:t1","provider":"amazon-bedrock","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#;
+        let BlocksCommand::User { provider, .. } = parse_blocks_line(line).expect("parses") else {
+            panic!("expected user command");
+        };
+        assert_eq!(provider.as_deref(), Some("amazon-bedrock"));
+    }
+
+    #[test]
+    fn ignores_blank_provider_on_blocks_user_line() {
+        let line = r#"{"type":"user","provider":"  ","text":"hi"}"#;
+        let BlocksCommand::User { provider, .. } = parse_blocks_line(line).expect("parses") else {
+            panic!("expected user command");
+        };
+        assert_eq!(provider, None);
     }
 
     #[test]
