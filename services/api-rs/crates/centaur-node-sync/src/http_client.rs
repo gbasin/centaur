@@ -77,14 +77,13 @@ impl AtriumClient for HttpAtriumClient {
     ) -> Result<u64, String> {
         // Stream the body (chunked) — ureq reads `reader` to EOF without buffering it
         // whole, so an arbitrarily large file uploads in constant node memory. The
-        // server streams the chunked body straight to S3 (the x-artifact-stream hint
-        // lets it pick the multipart/streaming path; x-artifact-size pre-sizes it).
+        // dedicated /capture-stream route streams the chunked body straight to S3;
+        // x-artifact-size is an informational size hint.
         let mut req = self
             .agent
             .post(&self.url(&format!("/artifacts/capture-stream?path={}", enc(path))))
             .set("x-api-key", &self.api_key)
             .set("content-type", "application/octet-stream")
-            .set("x-artifact-stream", "1")
             .set("x-artifact-size", &size_hint.to_string());
         if base_seq > 0 {
             req = req.set("x-artifact-base-seq", &base_seq.to_string());
