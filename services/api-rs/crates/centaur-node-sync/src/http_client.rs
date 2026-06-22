@@ -190,6 +190,42 @@ impl AtriumClient for HttpAtriumClient {
         }
         Ok((out, next))
     }
+
+    fn atrium_changes(&self, since: &str) -> Result<(Vec<String>, String), String> {
+        let resp = self
+            .agent
+            .get(&self.url(&format!("/atrium/changes?since={}", enc(since))))
+            .set("x-api-key", &self.api_key)
+            .call()
+            .map_err(|e| format!("atrium changes {since}: {e}"))?;
+        let v: serde_json::Value = resp.into_json().map_err(|e| e.to_string())?;
+        let next = v
+            .get("next_cursor")
+            .and_then(|c| c.as_str())
+            .unwrap_or(since)
+            .to_string();
+        let mut session_ids = Vec::new();
+        if let Some(rows) = v.get("rows").and_then(|r| r.as_array()) {
+            for row in rows {
+                if let Some(session_id) = row.get("sessionId").and_then(|s| s.as_str()) {
+                    session_ids.push(session_id.to_string());
+                }
+            }
+        }
+        Ok((session_ids, next))
+    }
+
+    fn atrium_doc(&self, target_id: &str, doc: &str) -> Result<Vec<u8>, String> {
+        let resp = self
+            .agent
+            .get(&self.url(&format!("/atrium/sessions/{}/{}", enc(target_id), doc)))
+            .set("x-api-key", &self.api_key)
+            .call()
+            .map_err(|e| format!("atrium doc {target_id}/{doc}: {e}"))?;
+        let mut buf = Vec::new();
+        std::io::copy(&mut resp.into_reader(), &mut buf).map_err(|e| e.to_string())?;
+        Ok(buf)
+    }
 }
 
 #[cfg(test)]

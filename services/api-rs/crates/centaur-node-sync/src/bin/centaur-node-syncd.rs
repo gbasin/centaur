@@ -13,6 +13,7 @@
 //!      optional NODE_SYNC_HARNESS_THREAD_ID, optional NODE_SYNC_HARNESS_HOME,
 //!      NODE_SYNC_STATE
 //!      (default /var/lib/centaur/sync-state/<session>.json),
+//!      NODE_SYNC_ATRIUM_ROOT (default /atrium),
 //!      NODE_SYNC_INTERVAL_SECS (2).
 //! Flags: --once (hydrate if needed + one capture + one inbound sweep, then exit),
 //!        --interval <secs> (overrides NODE_SYNC_INTERVAL_SECS),
@@ -23,6 +24,7 @@ fn main() {
     use centaur_node_sync::echo::EchoGuard;
     use centaur_node_sync::fs_linux;
     use centaur_node_sync::http_client::HttpAtriumClient;
+    use centaur_node_sync::materialize_once;
     use centaur_node_sync::quiesce::{LeaseGate, apply_quiesced_writes};
     use centaur_node_sync::runtime::{
         AtriumClient, HarnessTranscriptKind, UpperReader, capture_sweep, harness_transcript_sweep,
@@ -122,6 +124,14 @@ fn main() {
     let merged_env = env("NODE_SYNC_MERGED");
     let upper = PathBuf::from(&upper_env);
     let merged = PathBuf::from(&merged_env);
+    let atrium_root = {
+        let s = env("NODE_SYNC_ATRIUM_ROOT");
+        if s.is_empty() {
+            PathBuf::from("/atrium")
+        } else {
+            PathBuf::from(s)
+        }
+    };
     // Optional: a repo working tree whose uncommitted WIP we snapshot to the ledger
     // (pure-read git diff, H6/§5A). Empty = no WIP capture.
     let repo = env("NODE_SYNC_REPO");
@@ -494,6 +504,16 @@ fn main() {
                 }
                 Err(e) => eprintln!("wip {repo}: {e}"),
             }
+        }
+
+        match materialize_once(&client, &atrium_root, &state.atrium_cursor) {
+            Ok(next) => {
+                if next != state.atrium_cursor {
+                    println!("atrium materializer: cursor={next}");
+                }
+                state.atrium_cursor = next;
+            }
+            Err(e) => eprintln!("atrium materializer: {e}"),
         }
 
         let _ = state.save(&state_file);

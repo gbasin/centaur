@@ -14,14 +14,35 @@ use std::path::Path;
 
 use crate::adopt::LocalState;
 
-#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+fn default_cursor() -> String {
+    "0.0".to_string()
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct DaemonState {
     /// path → the agent's working-copy sync-state for that artifact.
+    #[serde(default)]
     pub paths: HashMap<String, LocalState>,
     /// the gap-free change-feed cursor ("<xid>.<id>").
+    #[serde(default = "default_cursor")]
     pub cursor: String,
+    /// the session-level Atrium materializer change-feed cursor ("<xid>.<id>").
+    #[serde(default = "default_cursor")]
+    pub atrium_cursor: String,
     /// whether we've reconstructed base_seqs from the feed yet.
+    #[serde(default)]
     pub hydrated: bool,
+}
+
+impl Default for DaemonState {
+    fn default() -> Self {
+        Self {
+            paths: HashMap::new(),
+            cursor: default_cursor(),
+            atrium_cursor: default_cursor(),
+            hydrated: false,
+        }
+    }
 }
 
 impl DaemonState {
@@ -30,10 +51,7 @@ impl DaemonState {
         std::fs::read(file)
             .ok()
             .and_then(|b| serde_json::from_slice::<DaemonState>(&b).ok())
-            .unwrap_or_else(|| DaemonState {
-                cursor: "0.0".to_string(),
-                ..Default::default()
-            })
+            .unwrap_or_default()
     }
 
     /// Persist atomically (temp + rename) so a crash never leaves a torn file.
@@ -99,13 +117,16 @@ mod tests {
         let _ = std::fs::remove_file(&f);
         let mut s = DaemonState::load(&f);
         assert_eq!(s.cursor, "0.0");
+        assert_eq!(s.atrium_cursor, "0.0");
         s.note_hydrated_version("proj-x/a.md", 5, Some("sha5".into()));
         s.cursor = "100.5".into();
+        s.atrium_cursor = "200.9".into();
         s.hydrated = true;
         s.save(&f).unwrap();
 
         let r = DaemonState::load(&f);
         assert_eq!(r.cursor, "100.5");
+        assert_eq!(r.atrium_cursor, "200.9");
         assert!(r.hydrated);
         assert_eq!(r.base_seqs().get("proj-x/a.md"), Some(&5));
         let _ = std::fs::remove_file(&f);
