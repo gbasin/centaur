@@ -187,13 +187,29 @@ spec:
           mountPropagation: HostToContainer
 YAML
 kubectl -n "${NS}" wait --for=condition=Ready "pod/${AGENT_POD}" --timeout=180s
-kubectl -n "${NS}" exec "${AGENT_POD}" -c agent -- /bin/sh -ceu '
+
+# --- mountPropagation diagnostics (the linchpin: init Bidirectional -> node -> agent
+#     HostToContainer). Dump before asserting so a failure shows exactly which hop broke.
+echo "--- DIAG: provision-overlay (init) log ---"
+kubectl -n "${NS}" logs "${AGENT_POD}" -c overlay-setup 2>&1 || true
+echo "--- DIAG: agent view (id, /workspace, mounts) ---"
+kubectl -n "${NS}" exec "${AGENT_POD}" -c agent -- /bin/sh -c \
+  'id; echo "ls -la /workspace:"; ls -la /workspace 2>&1; echo "overlay mounts:"; grep -E "centaur|overlay" /proc/mounts 2>&1 || true' || true
+echo "--- DIAG: node view (mounts + dirs on ${KIND_CLUSTER}-control-plane) ---"
+docker exec "${KIND_CLUSTER}-control-plane" sh -c \
+  'echo "node overlay/centaur mounts:"; (grep -E "centaur|overlay" /proc/mounts || true); echo "ls /var/lib/centaur/overlays:"; ls -la /var/lib/centaur/overlays 2>&1 || true; echo "ls /run/centaur/merged/'"${SESSION}"':"; ls -la "/run/centaur/merged/'"${SESSION}"'" 2>&1 || true' || true
+
+# Tolerant write: keep going to surface the capture assertion + failure diagnostics even
+# if the agent can't write /workspace (e.g. overlay didn't propagate).
+if ! kubectl -n "${NS}" exec "${AGENT_POD}" -c agent -- /bin/sh -ceu '
   echo "created from agent" > /workspace/new.txt
   echo "modified from agent" >> /workspace/seed.txt
   rm /workspace/delete-me.txt
   test -f /workspace/new.txt
   test ! -e /workspace/delete-me.txt
-'
+'; then
+  echo "WARN: agent write exec failed (rc=$?); continuing to capture-assert for diagnostics" >&2
+fi
 
 POD="$(node_sync_pod)"
 echo "    node-sync pod: ${POD}"
