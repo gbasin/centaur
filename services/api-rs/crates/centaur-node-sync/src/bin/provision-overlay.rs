@@ -45,6 +45,12 @@ fn run() -> Result<(), String> {
     std::fs::create_dir_all(&merged)
         .map_err(|e| format!("create merged {}: {e}", merged.display()))?;
 
+    // Fixture-grade: the overlay's merged root inherits the UPPER dir's permissions, so
+    // make the upper world-writable. Without this the hardened agent (runAsUser 1001)
+    // gets "Permission denied" creating files in /workspace. Production will instead chown
+    // the upper to the agent uid (or use fsGroup) rather than 0o777.
+    set_dir_mode(&upper, 0o777)?;
+
     seed_lower(&lower)?;
 
     if is_overlay_mount(&merged)? {
@@ -205,6 +211,18 @@ fn set_fixture_permissions(lower: &Path) -> Result<(), String> {
 
 #[cfg(not(unix))]
 fn set_fixture_permissions(_lower: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_dir_mode(dir: &Path, mode: u32) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode))
+        .map_err(|e| format!("chmod {}: {e}", dir.display()))
+}
+
+#[cfg(not(unix))]
+fn set_dir_mode(_dir: &Path, _mode: u32) -> Result<(), String> {
     Ok(())
 }
 
