@@ -57,6 +57,8 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            - name: NODE_SYNC_ATRIUM_ROOT
+              value: "/var/lib/centaur/atrium"
           volumeMounts:
             # The session-keyed persistent uppers live here (one dir per session).
             # mountPropagation HostToContainer so newly-provisioned overlays appear.
@@ -66,6 +68,10 @@ spec:
             # The node-local CAS cache (reflinked into lowers; immutable 0444).
             - name: cas-cache
               mountPath: /var/lib/centaur/cas
+            # Node-side read-only context tree materialized by this daemon. Agent
+            # pods should mount the same hostPath readOnly: true at /atrium.
+            - name: atrium-root
+              mountPath: /var/lib/centaur/atrium
       volumes:
         - name: overlays
           hostPath:
@@ -74,6 +80,10 @@ spec:
         - name: cas-cache
           hostPath:
             path: /var/lib/centaur/cas
+            type: DirectoryOrCreate
+        - name: atrium-root
+          hostPath:
+            path: /var/lib/centaur/atrium
             type: DirectoryOrCreate
       tolerations:
         - operator: Exists                 # run on every node, incl. tainted ones

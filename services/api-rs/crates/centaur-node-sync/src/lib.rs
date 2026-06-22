@@ -20,6 +20,7 @@ pub mod cas;
 pub mod echo;
 pub mod http_client;
 pub mod manifest;
+pub mod materializer;
 pub mod overlay;
 pub mod quiesce;
 pub mod runtime;
@@ -33,6 +34,7 @@ pub mod fs_linux;
 
 use std::path::PathBuf;
 
+pub use materializer::{ATRIUM_DOCS, materialize_once};
 pub use overlay::{OverlayOp, RawEntry, RawFileType, SkipReason, classify};
 
 /// Reduce a scan of upper entries to the capture operations worth shipping:

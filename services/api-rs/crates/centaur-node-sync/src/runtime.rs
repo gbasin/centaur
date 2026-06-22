@@ -51,6 +51,11 @@ pub trait AtriumClient {
     ) -> Result<(Vec<(String, RemoteChange)>, String), String> {
         Ok((vec![], _cursor.to_string()))
     }
+    /// Poll Atrium's session-level materializer change-feed past `since` →
+    /// changed session ids + the next cursor.
+    fn atrium_changes(&self, since: &str) -> Result<(Vec<String>, String), String>;
+    /// Fetch one rendered Atrium document body for a target session.
+    fn atrium_doc(&self, target_id: &str, doc: &str) -> Result<Vec<u8>, String>;
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -624,6 +629,12 @@ mod tests {
             self.transcripts.push((harness.to_owned(), bytes.to_vec()));
             Ok(())
         }
+        fn atrium_changes(&self, since: &str) -> Result<(Vec<String>, String), String> {
+            Ok((vec![], since.to_string()))
+        }
+        fn atrium_doc(&self, target_id: &str, doc: &str) -> Result<Vec<u8>, String> {
+            Ok(format!("{target_id}/{doc}").into_bytes())
+        }
     }
 
     fn reg(p: &str) -> RawEntry {
@@ -1071,6 +1082,12 @@ mod tests {
         }
         fn fetch_bytes(&mut self, _p: &str, _s: u64) -> Result<Vec<u8>, String> {
             Ok(vec![])
+        }
+        fn atrium_changes(&self, since: &str) -> Result<(Vec<String>, String), String> {
+            Ok((vec![], since.to_string()))
+        }
+        fn atrium_doc(&self, target_id: &str, doc: &str) -> Result<Vec<u8>, String> {
+            Ok(format!("{target_id}/{doc}").into_bytes())
         }
     }
 
