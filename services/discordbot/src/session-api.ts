@@ -1,4 +1,7 @@
-import type { RustSessionStreamEvent } from "@centaur/harness-events";
+import type {
+  RustSessionStreamData,
+  RustSessionStreamEvent,
+} from "@centaur/harness-events";
 import type { Attachment, Message } from "chat";
 import { withDiscordEmbedText } from "./discord-starter";
 import type {
@@ -770,12 +773,16 @@ function isTerminalCodexOutputLine(line: string): boolean {
   );
 }
 
-function sessionEventData(event: ParsedSessionEvent): unknown {
+function sessionEventData(event: ParsedSessionEvent): RustSessionStreamData {
   try {
-    return JSON.parse(event.data);
+    const data: unknown = JSON.parse(event.data);
+    if (data === null || typeof data === "string" || isJsonObject(data)) {
+      return data;
+    }
   } catch {
-    return event.data;
+    // Fall through to the raw SSE payload below.
   }
+  return event.data;
 }
 
 function sessionErrorMessage(

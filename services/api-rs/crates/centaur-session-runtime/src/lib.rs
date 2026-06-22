@@ -210,6 +210,16 @@ struct SandboxReadyObservation<'a> {
     startup_duration: Option<Duration>,
 }
 
+struct EnsureSessionSandboxInput<'a> {
+    thread_key: &'a ThreadKey,
+    harness_type: &'a HarnessType,
+    existing_sandbox_id: Option<&'a str>,
+    iron_control_principal: Option<&'a str>,
+    resume_thread_id: Option<&'a str>,
+    execution_id: &'a str,
+    environment: &'a [(String, String)],
+}
+
 impl SessionRuntime {
     pub fn new(store: PgSessionStore, sandbox_runtime: SandboxRuntime) -> Self {
         Self {
@@ -980,15 +990,15 @@ impl SessionRuntime {
             }
 
             let sandbox_id = match self
-                .ensure_session_sandbox(
+                .ensure_session_sandbox(EnsureSessionSandboxInput {
                     thread_key,
-                    &session.harness_type,
-                    session.sandbox_id.as_deref(),
-                    session.iron_control_principal.as_deref(),
+                    harness_type: &session.harness_type,
+                    existing_sandbox_id: session.sandbox_id.as_deref(),
+                    iron_control_principal: session.iron_control_principal.as_deref(),
                     resume_thread_id,
-                    &execution.execution_id,
-                    &environment,
-                )
+                    execution_id: &execution.execution_id,
+                    environment: &environment,
+                })
                 .await
             {
                 Ok(sandbox_id) => sandbox_id,
@@ -1404,14 +1414,17 @@ impl SessionRuntime {
 
     async fn ensure_session_sandbox(
         &self,
-        thread_key: &ThreadKey,
-        harness_type: &HarnessType,
-        existing_sandbox_id: Option<&str>,
-        iron_control_principal: Option<&str>,
-        resume_thread_id: Option<&str>,
-        execution_id: &str,
-        environment: &[(String, String)],
+        input: EnsureSessionSandboxInput<'_>,
     ) -> Result<String, SessionRuntimeError> {
+        let EnsureSessionSandboxInput {
+            thread_key,
+            harness_type,
+            existing_sandbox_id,
+            iron_control_principal,
+            resume_thread_id,
+            execution_id,
+            environment,
+        } = input;
         let span = info_span!(
             "centaur.api_rs.sandbox.ensure",
             component = COMPONENT_SESSION_RUNTIME,
