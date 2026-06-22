@@ -1,5 +1,10 @@
 # Centaur — Developer Guide
 
+> **Atrium's Centaur (`gbasin/centaur`):** this is our fork, not vanilla
+> `paradigmxyz/centaur` — read **[`ATRIUM_FORK.md`](ATRIUM_FORK.md)** for how we work
+> here: a single `main` branch (no upstreaming), fork migrations (`1000+`), the Atrium
+> surface (artifact capture, harness resume, Claude SDK HITL bridge), and deploy.
+
 ## Quick Start
 
 ### 1. Clone and configure
