@@ -12,11 +12,14 @@ use serde_json::{Value, json};
 
 const DEFAULT_OVERLAYS_ROOT: &str = "/var/lib/centaur/overlays";
 const DEFAULT_MERGED_ROOT: &str = "/run/centaur/merged";
+const DEFAULT_ATRIUM_ROOT: &str = "/var/lib/centaur/atrium";
 const DEFAULT_WORKSPACE_MOUNT_PATH: &str = "/workspace";
+const DEFAULT_ATRIUM_MOUNT_PATH: &str = "/atrium";
 const DEFAULT_AGENT_UID: u32 = 1001;
 
 const SESSION_UPPER_VOLUME: &str = "session-upper";
 const WORKSPACE_VOLUME: &str = "workspace";
+const ATRIUM_CONTEXT_VOLUME: &str = "atrium-context";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OverlayConfig {
@@ -163,6 +166,24 @@ pub(crate) fn overlay_agent_volume_mount_json(overlay: &OverlayConfig, _session:
     })
 }
 
+pub(crate) fn atrium_agent_volume_mount_json() -> Value {
+    json!({
+        "name": ATRIUM_CONTEXT_VOLUME,
+        "mountPath": DEFAULT_ATRIUM_MOUNT_PATH,
+        "readOnly": true,
+    })
+}
+
+pub(crate) fn atrium_volume_json(session: &str) -> Value {
+    json!({
+        "name": ATRIUM_CONTEXT_VOLUME,
+        "hostPath": {
+            "path": atrium_session_path(session),
+            "type": "DirectoryOrCreate",
+        },
+    })
+}
+
 fn push_optional_arg(args: &mut Vec<String>, flag: &str, value: Option<&str>) {
     if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
         args.push(flag.to_owned());
@@ -198,6 +219,10 @@ fn overlays_host_root(overlay: &OverlayConfig) -> String {
 
 fn merged_session_path(overlay: &OverlayConfig, session: &str) -> String {
     path_string(&overlay.merged_root.join(session))
+}
+
+fn atrium_session_path(session: &str) -> String {
+    path_string(&Path::new(DEFAULT_ATRIUM_ROOT).join(session))
 }
 
 fn path_string(path: &Path) -> String {

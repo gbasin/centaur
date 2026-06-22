@@ -677,7 +677,9 @@ fn build_agent_sandbox(
             overlay,
             id.as_str(),
         ));
+        volume_mounts.push(overlay::atrium_agent_volume_mount_json());
         volumes.extend(overlay::overlay_volumes_json(overlay, id.as_str()));
+        volumes.push(overlay::atrium_volume_json(id.as_str()));
         init_containers.push(overlay::overlay_init_container_json(
             overlay,
             id.as_str(),
@@ -1144,6 +1146,37 @@ mod tests {
     }
 
     #[test]
+    fn overlay_enabled_renders_session_scoped_read_only_atrium_mount() {
+        let spec = SandboxSpec::new("centaur-agent:latest");
+        let config = AgentSandboxConfig::new("centaur")
+            .overlay(OverlayConfig::new("centaur-node-sync:test"));
+
+        let sandbox = build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).unwrap();
+        let pod_spec = &sandbox.spec.pod_template.spec;
+
+        let volumes = pod_spec.volumes.as_ref().unwrap();
+        let atrium = volumes
+            .iter()
+            .find(|volume| volume.name == "atrium-context")
+            .expect("atrium-context volume");
+        let atrium_host_path = atrium.host_path.as_ref().unwrap();
+        assert_eq!(atrium_host_path.path, "/var/lib/centaur/atrium/asbx-test");
+        assert_eq!(
+            atrium_host_path.r#type.as_deref(),
+            Some("DirectoryOrCreate")
+        );
+
+        let agent_mounts = pod_spec.containers[0].volume_mounts.as_ref().unwrap();
+        let atrium_mount = agent_mounts
+            .iter()
+            .find(|mount| mount.name == "atrium-context")
+            .expect("atrium-context mount");
+        assert_eq!(atrium_mount.mount_path, "/atrium");
+        assert_eq!(atrium_mount.read_only, Some(true));
+        assert_eq!(atrium_mount.mount_propagation, None);
+    }
+
+    #[test]
     fn overlay_disabled_renders_no_overlay_wiring() {
         let spec = SandboxSpec::new("centaur-agent:latest");
         let config = AgentSandboxConfig::new("centaur");
@@ -1165,7 +1198,9 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .iter()
-                .all(|volume| volume.name != "session-upper" && volume.name != "workspace")
+                .all(|volume| volume.name != "session-upper"
+                    && volume.name != "workspace"
+                    && volume.name != "atrium-context")
         );
         assert!(
             pod_spec.containers[0]
@@ -1173,7 +1208,9 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .iter()
-                .all(|mount| mount.name != "workspace" && mount.mount_propagation.is_none())
+                .all(|mount| mount.name != "workspace"
+                    && mount.name != "atrium-context"
+                    && mount.mount_propagation.is_none())
         );
     }
 
