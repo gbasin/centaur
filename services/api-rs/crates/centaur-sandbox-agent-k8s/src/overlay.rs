@@ -56,6 +56,7 @@ pub(crate) struct OverlayMetadata {
     pub(crate) harness_thread_id: Option<String>,
     pub(crate) harness_home: Option<String>,
     pub(crate) repo: Option<String>,
+    pub(crate) repos_json: Option<String>,
 }
 
 impl OverlayMetadata {
@@ -85,6 +86,7 @@ impl OverlayMetadata {
                 .map(str::to_owned),
             harness_home,
             repo: env_value(spec, "AGENT_REPO").map(str::to_owned),
+            repos_json: env_value(spec, "AGENT_REPOS_JSON").map(str::to_owned),
         }
     }
 }
@@ -117,6 +119,7 @@ pub(crate) fn overlay_manifest_init_container_json(
         metadata.harness_home.as_deref(),
     );
     push_optional_arg(&mut args, "--repo", metadata.repo.as_deref());
+    push_optional_arg(&mut args, "--repos-json", metadata.repos_json.as_deref());
 
     json!({
         "name": "overlay-manifest-writer",

@@ -2,21 +2,34 @@ use axum::response::sse::Event;
 use centaur_session_core::{HarnessType, Session, SessionEvent, SessionMessageInput, ThreadKey};
 use centaur_session_runtime::SESSION_OUTPUT_LINE_EVENT;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use thiserror::Error;
+
+pub const SESSION_REPOS_METADATA_KEY: &str = "centaur_session_repos";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CreateSessionRequest {
     pub harness_type: HarnessType,
     pub persona_id: Option<String>,
     pub metadata: Option<Value>,
+    #[serde(default)]
+    pub repos: Vec<RepoSpec>,
     /// What to do when the session already exists on a different harness.
     /// Omitted or `reject`: fail with 409. `restart`: stop the old sandbox and
     /// restart the thread on the requested harness (the new harness starts
     /// with no conversational memory).
     #[serde(default)]
     pub on_harness_conflict: Option<OnHarnessConflict>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RepoSpec {
+    pub repo: String,
+    #[serde(default, rename = "ref")]
+    pub r#ref: Option<String>,
+    #[serde(default)]
+    pub subdir: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -210,6 +223,84 @@ pub fn stream_error_sse(message: impl Into<String>) -> Event {
         })
 }
 
+pub fn metadata_with_repos(
+    metadata: Option<Value>,
+    repos: &[RepoSpec],
+) -> Result<Option<Value>, String> {
+    if repos.is_empty() {
+        return Ok(metadata);
+    }
+    validate_repo_specs(repos)?;
+
+    let mut object = match metadata {
+        Some(Value::Object(object)) => object,
+        Some(_) => {
+            return Err("metadata must be a JSON object when repos are provided".to_string());
+        }
+        None => Map::new(),
+    };
+    object.insert(
+        SESSION_REPOS_METADATA_KEY.to_string(),
+        serde_json::to_value(repos).map_err(|e| e.to_string())?,
+    );
+    Ok(Some(Value::Object(object)))
+}
+
+fn validate_repo_specs(repos: &[RepoSpec]) -> Result<(), String> {
+    for spec in repos {
+        validate_relative_repo(&spec.repo)?;
+        if let Some(subdir) = &spec.subdir {
+            validate_single_segment("repo subdir", subdir)?;
+        }
+        if let Some(git_ref) = &spec.r#ref
+            && (git_ref.contains('\0') || git_ref.trim().is_empty())
+        {
+            return Err("repo ref must not be empty or contain NUL bytes".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn validate_relative_repo(repo: &str) -> Result<(), String> {
+    if repo.contains('\0') || repo.trim().is_empty() {
+        return Err("repo must not be empty or contain NUL bytes".to_string());
+    }
+    if repo.trim() != repo {
+        return Err("repo must not contain leading or trailing whitespace".to_string());
+    }
+    let path = std::path::Path::new(repo);
+    if path.components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::RootDir
+                | std::path::Component::CurDir
+                | std::path::Component::ParentDir
+                | std::path::Component::Prefix(_)
+        )
+    }) {
+        return Err("repo must be a relative path without . or .. components".to_string());
+    }
+    Ok(())
+}
+
+fn validate_single_segment(label: &str, value: &str) -> Result<(), String> {
+    if value.contains('\0') || value.trim().is_empty() {
+        return Err(format!("{label} must not be empty or contain NUL bytes"));
+    }
+    if value.trim() != value {
+        return Err(format!(
+            "{label} must not contain leading or trailing whitespace"
+        ));
+    }
+    let mut components = std::path::Path::new(value).components();
+    match (components.next(), components.next()) {
+        (Some(std::path::Component::Normal(name)), None) if name == std::ffi::OsStr::new(value) => {
+            Ok(())
+        }
+        _ => Err(format!("{label} must be a single path segment")),
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum SessionEventConversionError {
     #[error("session.output.line event {event_id} payload must be a string")]
@@ -220,11 +311,66 @@ pub enum SessionEventConversionError {
 
 #[cfg(test)]
 mod tests {
-    use super::SessionEventName;
+    use centaur_session_core::HarnessType;
+
+    use super::{
+        CreateSessionRequest, RepoSpec, SESSION_REPOS_METADATA_KEY, SessionEventName,
+        metadata_with_repos,
+    };
 
     #[test]
     fn artifact_captured_is_forwarded_as_its_event_kind() {
         let event = SessionEventName::from("artifact.captured");
         assert_eq!(event.as_str(), "artifact.captured");
+    }
+
+    #[test]
+    fn create_session_request_repos_default_empty_for_back_compat() {
+        let request: CreateSessionRequest =
+            serde_json::from_str(r#"{"harness_type":"codex","persona_id":null,"metadata":null}"#)
+                .unwrap();
+
+        assert!(request.repos.is_empty());
+    }
+
+    #[test]
+    fn create_session_request_round_trips_repos() {
+        let request = CreateSessionRequest {
+            harness_type: HarnessType::Codex,
+            persona_id: None,
+            metadata: Some(serde_json::json!({"source":"test"})),
+            repos: vec![RepoSpec {
+                repo: "acme/foo".to_string(),
+                r#ref: Some("main".to_string()),
+                subdir: Some("foo".to_string()),
+            }],
+            on_harness_conflict: None,
+        };
+
+        let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(value["repos"][0]["repo"], "acme/foo");
+        assert_eq!(value["repos"][0]["ref"], "main");
+        assert_eq!(value["repos"][0]["subdir"], "foo");
+
+        let round_trip: CreateSessionRequest = serde_json::from_value(value).unwrap();
+        assert_eq!(round_trip.repos, request.repos);
+    }
+
+    #[test]
+    fn metadata_with_repos_threads_specs_under_internal_key() {
+        let metadata = metadata_with_repos(
+            Some(serde_json::json!({"source":"test"})),
+            &[RepoSpec {
+                repo: "acme/foo".to_string(),
+                r#ref: None,
+                subdir: Some("foo".to_string()),
+            }],
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(metadata["source"], "test");
+        assert_eq!(metadata[SESSION_REPOS_METADATA_KEY][0]["repo"], "acme/foo");
+        assert_eq!(metadata[SESSION_REPOS_METADATA_KEY][0]["subdir"], "foo");
     }
 }

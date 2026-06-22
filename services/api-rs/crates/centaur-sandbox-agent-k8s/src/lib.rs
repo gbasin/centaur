@@ -1218,6 +1218,32 @@ mod tests {
     }
 
     #[test]
+    fn overlay_manifest_writer_threads_multi_repo_json() {
+        let repos_json = r#"[{"repo":"acme/foo","ref":"main"},{"repo":"acme/bar","subdir":"bar"}]"#;
+        let spec = SandboxSpec::new("centaur-agent:latest").env("AGENT_REPOS_JSON", repos_json);
+        let config = AgentSandboxConfig::new("centaur")
+            .overlay(OverlayConfig::new("centaur-node-sync:test"));
+
+        let sandbox = build_agent_sandbox(&SandboxId::new("asbx-test"), &spec, &config).unwrap();
+        let manifest_writer = sandbox
+            .spec
+            .pod_template
+            .spec
+            .init_containers
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|container| container.name == "overlay-manifest-writer")
+            .expect("overlay-manifest-writer init container");
+        let args = manifest_writer.args.as_ref().unwrap();
+
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "--repos-json" && pair[1] == repos_json)
+        );
+    }
+
+    #[test]
     fn overlay_disabled_renders_no_overlay_wiring() {
         let spec = SandboxSpec::new("centaur-agent:latest");
         let config = AgentSandboxConfig::new("centaur");

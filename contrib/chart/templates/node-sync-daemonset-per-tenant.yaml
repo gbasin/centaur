@@ -77,6 +77,9 @@ spec:
               mountPropagation: Bidirectional
             - name: cas-cache
               mountPath: /var/lib/centaur/cas
+            - name: repo-cache
+              mountPath: /cache
+              readOnly: true
       volumes:
         - name: overlays
           hostPath:
@@ -101,6 +104,10 @@ spec:
         - name: cas-cache
           hostPath:
             path: /var/lib/centaur/cas
+            type: DirectoryOrCreate
+        - name: repo-cache
+          hostPath:
+            path: {{ $.Values.repoCache.hostPath | quote }}
             type: DirectoryOrCreate
       tolerations:
         - key: centaur.io/tenant

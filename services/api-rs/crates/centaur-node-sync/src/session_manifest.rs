@@ -5,7 +5,7 @@
 //! only runs sessions that have a readable sidecar manifest.
 
 use crate::overlay_mount::DEFAULT_AGENT_UID;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SessionManifest {
@@ -19,8 +19,19 @@ pub struct SessionManifest {
     pub harness_home: String,
     #[serde(default)]
     pub repo: String,
+    #[serde(default)]
+    pub repos: Vec<RepoMount>,
     #[serde(default = "default_agent_uid")]
     pub agent_uid: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RepoMount {
+    pub repo: String,
+    #[serde(default, rename = "ref")]
+    pub r#ref: Option<String>,
+    #[serde(default)]
+    pub subdir: Option<String>,
 }
 
 fn default_agent_uid() -> u32 {
@@ -79,10 +90,12 @@ pub fn read_manifest(overlays_root: &Path, session: &str) -> Result<SessionManif
     if let Some(harness) = &manifest.harness {
         normalize_harness(harness)?;
     }
+    validate_repo_mounts(&manifest.repos)?;
     Ok(manifest)
 }
 
 pub fn write_manifest(overlays_root: &Path, manifest: &SessionManifest) -> Result<(), String> {
+    validate_repo_mounts(&manifest.repos)?;
     let dir = sessions_dir(overlays_root);
     std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     let path = manifest_path(overlays_root, &manifest.session);
@@ -145,6 +158,76 @@ pub fn discover_sessions(overlays_root: &Path) -> Result<SessionDiscovery, Strin
     Ok(out)
 }
 
+pub fn validate_repo_mounts(repos: &[RepoMount]) -> Result<(), String> {
+    for repo in repos {
+        validate_repo_mount(repo)?;
+    }
+    Ok(())
+}
+
+pub fn validate_repo_mount(repo: &RepoMount) -> Result<(), String> {
+    validate_repo_cache_path_syntax(&repo.repo)?;
+    if let Some(subdir) = &repo.subdir {
+        validate_repo_subdir_syntax(subdir)?;
+    }
+    if let Some(git_ref) = &repo.r#ref {
+        if git_ref.contains('\0') {
+            return Err("repo ref must not contain NUL bytes".to_string());
+        }
+        if git_ref.trim().is_empty() {
+            return Err("repo ref must not be empty".to_string());
+        }
+    }
+    Ok(())
+}
+
+pub fn validate_repo_cache_path_syntax(repo: &str) -> Result<(), String> {
+    if repo.contains('\0') {
+        return Err("repo must not contain NUL bytes".to_string());
+    }
+    if repo.trim().is_empty() {
+        return Err("repo must name a directory".to_string());
+    }
+    if repo.trim() != repo {
+        return Err("repo must not contain leading or trailing whitespace".to_string());
+    }
+
+    let path = Path::new(repo);
+    let mut normal_components = 0usize;
+    for component in path.components() {
+        match component {
+            Component::Normal(_) => normal_components += 1,
+            Component::CurDir
+            | Component::ParentDir
+            | Component::RootDir
+            | Component::Prefix(_) => {
+                return Err("repo must be a relative path without . or .. components".to_string());
+            }
+        }
+    }
+    if normal_components == 0 {
+        return Err("repo must name a directory".to_string());
+    }
+    Ok(())
+}
+
+pub fn validate_repo_subdir_syntax(subdir: &str) -> Result<(), String> {
+    if subdir.contains('\0') {
+        return Err("repo subdir must not contain NUL bytes".to_string());
+    }
+    if subdir.trim().is_empty() {
+        return Err("repo subdir must not be empty".to_string());
+    }
+    if subdir.trim() != subdir {
+        return Err("repo subdir must not contain leading or trailing whitespace".to_string());
+    }
+    let mut components = Path::new(subdir).components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(name)), None) if name == std::ffi::OsStr::new(subdir) => Ok(()),
+        _ => Err("repo subdir must be a single path segment".to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -158,6 +241,11 @@ mod tests {
             harness_thread_id: "thread-123".to_string(),
             harness_home: ".claude".to_string(),
             repo: "/workspace/repo".to_string(),
+            repos: vec![RepoMount {
+                repo: "acme/foo".to_string(),
+                r#ref: Some("main".to_string()),
+                subdir: Some("foo".to_string()),
+            }],
             agent_uid: 1001,
         };
 
@@ -168,10 +256,27 @@ mod tests {
         assert_eq!(value["harness_thread_id"], "thread-123");
         assert_eq!(value["harness_home"], ".claude");
         assert_eq!(value["repo"], "/workspace/repo");
+        assert_eq!(value["repos"][0]["repo"], "acme/foo");
+        assert_eq!(value["repos"][0]["ref"], "main");
+        assert_eq!(value["repos"][0]["subdir"], "foo");
         assert_eq!(value["agent_uid"], 1001);
 
         let round_trip: SessionManifest = serde_json::from_value(value).unwrap();
         assert_eq!(round_trip, manifest);
+    }
+
+    #[test]
+    fn missing_repos_deserializes_as_empty_for_back_compat() {
+        let manifest: SessionManifest = serde_json::from_value(serde_json::json!({
+            "session": "sess-1",
+            "merged": "/run/centaur/merged/sess-1",
+            "repo": "/workspace/repo"
+        }))
+        .unwrap();
+
+        assert!(manifest.repos.is_empty());
+        assert_eq!(manifest.repo, "/workspace/repo");
+        assert_eq!(manifest.agent_uid, DEFAULT_AGENT_UID);
     }
 
     #[test]
@@ -183,6 +288,7 @@ mod tests {
             harness_thread_id: String::new(),
             harness_home: String::new(),
             repo: String::new(),
+            repos: Vec::new(),
             agent_uid: 1001,
         };
 
@@ -210,6 +316,7 @@ mod tests {
                 harness_thread_id: String::new(),
                 harness_home: String::new(),
                 repo: String::new(),
+                repos: Vec::new(),
                 agent_uid: 1001,
             },
         )
@@ -243,5 +350,24 @@ mod tests {
                 .iter()
                 .all(|warning| !warning.contains(".dot-session"))
         );
+    }
+
+    #[test]
+    fn repo_mount_validation_rejects_traversal() {
+        let err = validate_repo_mount(&RepoMount {
+            repo: "../secret".to_string(),
+            r#ref: None,
+            subdir: Some("ok".to_string()),
+        })
+        .unwrap_err();
+        assert!(err.contains("relative path"));
+
+        let err = validate_repo_mount(&RepoMount {
+            repo: "acme/foo".to_string(),
+            r#ref: None,
+            subdir: Some("../secret".to_string()),
+        })
+        .unwrap_err();
+        assert!(err.contains("single path segment"));
     }
 }

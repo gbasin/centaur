@@ -46,6 +46,8 @@ const STEERING_STARTUP_RETRY_TIMEOUT: Duration = Duration::from_secs(15);
 const COMPONENT_SESSION_RUNTIME: &str = "session_runtime";
 const CLAUDE_CODE_OAUTH_TOKEN_ENV: &str = "CLAUDE_CODE_OAUTH_TOKEN";
 const CODEX_AUTH_JSON_ENV: &str = "CODEX_AUTH_JSON";
+const SESSION_REPOS_METADATA_KEY: &str = "centaur_session_repos";
+const AGENT_REPOS_JSON_ENV: &str = "AGENT_REPOS_JSON";
 const SANDBOX_STATE_DIR: &str = "/home/agent/state";
 const SANDBOX_CODEX_HOME: &str = "/home/agent/state/codex";
 const SANDBOX_CLAUDE_CONFIG_DIR: &str = "/home/agent/state/claude";
@@ -216,6 +218,7 @@ struct EnsureSessionSandboxInput<'a> {
     existing_sandbox_id: Option<&'a str>,
     iron_control_principal: Option<&'a str>,
     resume_thread_id: Option<&'a str>,
+    session_repos_json: Option<&'a str>,
     execution_id: &'a str,
     environment: &'a [(String, String)],
 }
@@ -895,6 +898,8 @@ impl SessionRuntime {
                 "starting session execution"
             );
             let session = self.store.get_session(thread_key).await?;
+            let session_metadata = self.store.get_session_metadata(thread_key).await?;
+            let session_repos_json = session_repos_json(&session_metadata);
             let resume_thread_id = session
                 .harness_thread_id
                 .as_deref()
@@ -996,6 +1001,7 @@ impl SessionRuntime {
                     existing_sandbox_id: session.sandbox_id.as_deref(),
                     iron_control_principal: session.iron_control_principal.as_deref(),
                     resume_thread_id,
+                    session_repos_json: session_repos_json.as_deref(),
                     execution_id: &execution.execution_id,
                     environment: &environment,
                 })
@@ -1422,6 +1428,7 @@ impl SessionRuntime {
             existing_sandbox_id,
             iron_control_principal,
             resume_thread_id,
+            session_repos_json,
             execution_id,
             environment,
         } = input;
@@ -1602,7 +1609,10 @@ impl SessionRuntime {
                 .warm_pool
                 .as_ref()
                 .filter(|_| {
-                    warm_harness_matches && environment.is_empty() && resume_thread_id.is_none()
+                    warm_harness_matches
+                        && environment.is_empty()
+                        && resume_thread_id.is_none()
+                        && session_repos_json.is_none()
                 })
             {
                 match warm_pool
@@ -1668,6 +1678,9 @@ impl SessionRuntime {
                     harness_type,
                     resume_thread_id,
                 );
+            if let Some(repos_json) = session_repos_json {
+                spec = spec.env(AGENT_REPOS_JSON_ENV, repos_json);
+            }
             for (name, value) in environment {
                 spec = spec.env(name.clone(), value.clone());
             }
@@ -4225,6 +4238,14 @@ fn execution_metadata(
     metadata
 }
 
+fn session_repos_json(metadata: &Value) -> Option<String> {
+    let repos = metadata.get(SESSION_REPOS_METADATA_KEY)?;
+    match repos {
+        Value::Array(entries) if !entries.is_empty() => Some(repos.to_string()),
+        _ => None,
+    }
+}
+
 fn idle_timeout_from_execution(execution: &SessionExecution) -> Option<Duration> {
     execution
         .metadata
@@ -4524,6 +4545,26 @@ mod tests {
         assert_eq!(metadata["source"], "test");
         assert_eq!(metadata["idle_timeout_ms"], 2_000);
         assert_eq!(metadata["max_duration_ms"], 5_000);
+    }
+
+    #[test]
+    fn session_repos_json_extracts_non_empty_repo_specs() {
+        let metadata = json!({
+            SESSION_REPOS_METADATA_KEY: [
+                {"repo": "acme/foo", "ref": "main", "subdir": "foo"},
+            ],
+        });
+
+        let repos_json = session_repos_json(&metadata).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&repos_json).unwrap(),
+            metadata[SESSION_REPOS_METADATA_KEY]
+        );
+        assert_eq!(
+            session_repos_json(&json!({SESSION_REPOS_METADATA_KEY: []})),
+            None
+        );
+        assert_eq!(session_repos_json(&json!({})), None);
     }
 
     #[test]

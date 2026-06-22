@@ -48,7 +48,7 @@ use crate::{
         AppendMessagesResponse, CancelSessionResponse, CreateSessionRequest, CreateSessionResponse,
         EmitWorkflowEventRequest, EventsQuery, ExecuteSessionRequest, ExecuteSessionResponse,
         ListWorkflowRunsQuery, OnHarnessConflict, SessionContextResponse, SessionSseEvent,
-        SlackThreadContext, stream_error_sse,
+        SlackThreadContext, metadata_with_repos, stream_error_sse,
     },
 };
 
@@ -285,17 +285,25 @@ async fn create_or_get_session(
     Json(request): Json<CreateSessionRequest>,
 ) -> Result<Json<CreateSessionResponse>, ApiError> {
     let thread_key = ThreadKey::try_from(raw_thread_key)?;
-    let on_harness_conflict = match request.on_harness_conflict {
+    let CreateSessionRequest {
+        harness_type,
+        persona_id,
+        metadata,
+        repos,
+        on_harness_conflict,
+    } = request;
+    let on_harness_conflict = match on_harness_conflict {
         Some(OnHarnessConflict::Restart) => HarnessConflictPolicy::Restart,
         Some(OnHarnessConflict::Reject) | None => HarnessConflictPolicy::Reject,
     };
+    let metadata = metadata_with_repos(metadata, &repos).map_err(ApiError::BadRequest)?;
     let outcome = state
         .runtime()?
         .create_or_get_session(
             &thread_key,
-            &request.harness_type,
-            request.persona_id.as_deref(),
-            request.metadata,
+            &harness_type,
+            persona_id.as_deref(),
+            metadata,
             on_harness_conflict,
         )
         .await?;

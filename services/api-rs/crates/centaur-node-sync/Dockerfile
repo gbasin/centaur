@@ -9,9 +9,10 @@ RUN cargo build --release -p centaur-node-sync --bins
 
 FROM debian:bookworm-slim
 # The daemon needs coreutils + libc (dynamically linked), mount(8)/umount(8) for
-# daemon-owned overlay lifecycle, and CA certs for egress TLS.
+# daemon-owned overlay lifecycle, git for repo lower clone/checkout fallback,
+# and CA certs for egress TLS.
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates mount \
+  && apt-get install -y --no-install-recommends ca-certificates git mount \
   && rm -rf /var/lib/apt/lists/*
 COPY --from=build /work/target/release/centaur-node-syncd /usr/local/bin/centaur-node-syncd
 COPY --from=build /work/target/release/scan-demo /usr/local/bin/scan-demo
