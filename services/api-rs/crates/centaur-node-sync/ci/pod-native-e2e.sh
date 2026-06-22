@@ -103,6 +103,13 @@ spec:
 YAML
 kubectl -n "${NS}" rollout status "deploy/${CAPTURE_SINK}" --timeout=120s
 
+# The chart declares an external `connect` (1Password) dependency that helm requires
+# present in charts/ before install, even though it is condition-gated off here. Fetch
+# chart deps first (build respects Chart.lock; update regenerates if the lock drifted).
+helm repo add onepassword https://1password.github.io/connect-helm-charts >/dev/null 2>&1 || true
+helm dependency build "${HERE}/../../../../../contrib/chart" \
+  || helm dependency update "${HERE}/../../../../../contrib/chart"
+
 helm upgrade --install centaur "${HERE}/../../../../../contrib/chart" \
   -n "${NS}" --create-namespace \
   --set nodeSync.enabled=true \
