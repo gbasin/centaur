@@ -39,7 +39,13 @@ pub fn materialize_once<C: AtriumClient + ?Sized>(
                     }
                 }
                 Err(error) => {
-                    eprintln!("atrium materializer fetch {session_id}/{doc}: {error}");
+                    // A 403 on full/events is the EXPECTED full-view gate response
+                    // when the viewer lacks raw access — the agent simply gets
+                    // lean-only context. Don't log it as an error (it would spam
+                    // every tick whenever the gate is off, which is the default).
+                    if !error.contains("status code 403") {
+                        eprintln!("atrium materializer fetch {session_id}/{doc}: {error}");
+                    }
                 }
             }
         }
