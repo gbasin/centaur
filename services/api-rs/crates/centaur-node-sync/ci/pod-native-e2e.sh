@@ -16,6 +16,8 @@ KIND_CLUSTER="${KIND_CLUSTER:-centaur}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SESSION="${SESSION:-c4ovl-pod-e2e}"
 AGENT_POD="${AGENT_POD:-c4ovl-agent}"
+REPO_SESSION="${REPO_SESSION:-${SESSION}-repo}"
+REPO_AGENT_POD="${REPO_AGENT_POD:-${AGENT_POD}-repo}"
 IMAGE="${IMAGE:-centaur-node-sync:e2e}"
 CAPTURE_SINK="${CAPTURE_SINK:-capture-sink}"
 
@@ -50,14 +52,14 @@ wait_for_log() {
   return 1
 }
 
-echo "==> [1/6] build + load the node-sync image"
+echo "==> [1/7] build + load the node-sync image"
 if [[ "${NODE_SYNC_SKIP_BUILD_LOAD:-0}" == "1" ]]; then
   echo "    SKIP: NODE_SYNC_SKIP_BUILD_LOAD=1"
 else
   IMAGE="${IMAGE}" KIND_CLUSTER="${KIND_CLUSTER}" bash "${HERE}/build-and-load.sh"
 fi
 
-echo "==> [2/6] install the capture sink and chart with the node-sync DaemonSet enabled"
+echo "==> [2/7] install the capture sink and chart with the node-sync DaemonSet enabled"
 kubectl create namespace "${NS}" --dry-run=client -o yaml | kubectl apply -f -
 kubectl -n "${NS}" create secret generic centaur-infra-env \
   --from-literal=ARTIFACT_CAPTURE_API_KEY=e2e-capture-key \
@@ -119,10 +121,10 @@ helm upgrade --install centaur "${HERE}/../../../../../contrib/chart" \
   --set nodeSync.scanIntervalSeconds=1 \
   --set "nodeSync.atriumBaseUrl=http://${CAPTURE_SINK}.${NS}.svc.cluster.local:5678"
 
-echo "==> [3/6] wait for the node-sync DaemonSet pod to be Ready"
+echo "==> [3/7] wait for the node-sync DaemonSet pod to be Ready"
 kubectl -n "${NS}" rollout status ds -l app.kubernetes.io/component=node-sync --timeout=180s
 
-echo "==> [4/6] provision a session overlay on the node + seed an agent edit"
+echo "==> [4/7] provision a fixture-lower session overlay on the node + seed an agent edit"
 kubectl -n "${NS}" delete pod "${AGENT_POD}" --ignore-not-found --wait=true
 kubectl -n "${NS}" apply -f - <<YAML
 apiVersion: v1
@@ -204,15 +206,119 @@ fi
 POD="$(node_sync_pod)"
 echo "    node-sync pod: ${POD}"
 
-echo "==> [5/6] assert capture round-trip (agent edit -> capture sink) via pod logs"
+echo "==> [5/7] assert fixture-lower capture round-trip (agent edit -> capture sink) via pod logs"
 wait_for_log "capture: [1-9][0-9]* upserts" "capture upsert"
 wait_for_log "capture: .* [1-9][0-9]* deletes" "capture delete"
 
-echo "==> [6/6] assert inbound adopt (remote edit -> merged) via pod logs"
+echo "==> [6/7] provision a repo-lower session and assert only new files hit upper/capture"
+kubectl -n "${NS}" delete pod "${REPO_AGENT_POD}" --ignore-not-found --wait=true
+kubectl -n "${NS}" apply -f - <<YAML
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${REPO_AGENT_POD}
+  annotations:
+    centaur.ai/session-id: "${REPO_SESSION}"
+spec:
+  automountServiceAccountToken: false
+  terminationGracePeriodSeconds: 1
+  volumes:
+    - name: session-upper
+      hostPath:
+        path: /var/lib/centaur
+        type: DirectoryOrCreate
+    - name: workspace
+      hostPath:
+        path: /run/centaur/merged/${REPO_SESSION}
+        type: DirectoryOrCreate
+  initContainers:
+    - name: repo-seed
+      image: ${IMAGE}
+      imagePullPolicy: IfNotPresent
+      command: ["/bin/sh", "-ceu"]
+      args:
+        - |
+          repo="/var/lib/centaur/repos/${REPO_SESSION}"
+          rm -rf "\${repo}"
+          mkdir -p "\${repo}/src"
+          printf 'repo lower readme\n' > "\${repo}/README.md"
+          printf 'pub fn lower() {}\n' > "\${repo}/src/lib.rs"
+          chmod 0755 "\${repo}" "\${repo}/src"
+          chmod 0644 "\${repo}/README.md" "\${repo}/src/lib.rs"
+          ls -la "\${repo}" "\${repo}/src"
+      volumeMounts:
+        - name: session-upper
+          mountPath: /var/lib/centaur
+    - name: overlay-setup
+      image: ${IMAGE}
+      imagePullPolicy: IfNotPresent
+      command: ["/usr/local/bin/provision-overlay"]
+      args: ["--session", "${REPO_SESSION}", "--repo", "/var/lib/centaur/repos/${REPO_SESSION}"]
+      securityContext:
+        privileged: true
+      volumeMounts:
+        - name: session-upper
+          mountPath: /var/lib/centaur
+          mountPropagation: Bidirectional
+        - name: workspace
+          mountPath: /run/centaur/merged/${REPO_SESSION}
+          mountPropagation: Bidirectional
+  containers:
+    - name: agent
+      image: ${IMAGE}
+      imagePullPolicy: IfNotPresent
+      command: ["/bin/sh", "-c", "sleep 3600"]
+      securityContext:
+        runAsUser: 1001
+        runAsNonRoot: true
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+        seccompProfile:
+          type: RuntimeDefault
+      volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+          mountPropagation: HostToContainer
+YAML
+kubectl -n "${NS}" wait --for=condition=Ready "pod/${REPO_AGENT_POD}" --timeout=180s
+
+echo "--- DIAG: repo seed log ---"
+kubectl -n "${NS}" logs "${REPO_AGENT_POD}" -c repo-seed 2>&1 || true
+echo "--- DIAG: repo provision-overlay (init) log ---"
+kubectl -n "${NS}" logs "${REPO_AGENT_POD}" -c overlay-setup 2>&1 || true
+echo "--- DIAG: repo agent view (id, /workspace, mounts) ---"
+kubectl -n "${NS}" exec "${REPO_AGENT_POD}" -c agent -- /bin/sh -c \
+  'id; echo "ls -la /workspace:"; ls -la /workspace 2>&1; echo "ls -la /workspace/src:"; ls -la /workspace/src 2>&1 || true; echo "overlay mounts:"; grep -E "centaur|overlay" /proc/mounts 2>&1 || true' || true
+echo "--- DIAG: repo node view (repo, upper, merged on ${KIND_CLUSTER}-control-plane) ---"
+docker exec "${KIND_CLUSTER}-control-plane" sh -c \
+  'echo "repo lower:"; ls -la "/var/lib/centaur/repos/'"${REPO_SESSION}"'" "/var/lib/centaur/repos/'"${REPO_SESSION}"'/src" 2>&1 || true; echo "upper:"; find "/var/lib/centaur/overlays/'"${REPO_SESSION}"'" -maxdepth 2 -mindepth 1 -print 2>&1 || true; echo "merged:"; ls -la "/run/centaur/merged/'"${REPO_SESSION}"'" 2>&1 || true' || true
+
+kubectl -n "${NS}" exec "${REPO_AGENT_POD}" -c agent -- /bin/sh -ceu '
+  grep -q "repo lower readme" /workspace/README.md
+  grep -q "pub fn lower" /workspace/src/lib.rs
+  test ! -w /workspace/README.md
+'
+docker exec "${KIND_CLUSTER}-control-plane" sh -ceu \
+  'test ! -e "/var/lib/centaur/overlays/'"${REPO_SESSION}"'/README.md";
+   test ! -e "/var/lib/centaur/overlays/'"${REPO_SESSION}"'/src/lib.rs"'
+
+kubectl -n "${NS}" exec "${REPO_AGENT_POD}" -c agent -- /bin/sh -ceu '
+  echo "created through repo lower session" > /workspace/agent-created.txt
+  test -f /workspace/agent-created.txt
+'
+docker exec "${KIND_CLUSTER}-control-plane" sh -ceu \
+  'test -f "/var/lib/centaur/overlays/'"${REPO_SESSION}"'/agent-created.txt";
+   test ! -e "/var/lib/centaur/overlays/'"${REPO_SESSION}"'/README.md";
+   test ! -e "/var/lib/centaur/overlays/'"${REPO_SESSION}"'/src/lib.rs"'
+wait_for_log "session ${REPO_SESSION}: capture: 1 upserts \\(0 streamed\\), 0 deletes" \
+  "repo-lower new-file-only capture"
+
+echo "==> [7/7] assert inbound adopt (remote edit -> merged) via pod logs"
 if [[ "${NODE_SYNC_E2E_INBOUND:-0}" == "1" ]]; then
   wait_for_log "inbound: [1-9][0-9]* adopted" "inbound adopt"
 else
   echo "SKIP: inbound-adopt deferred to the full-Atrium e2e (Phase 3)"
 fi
 
-echo "OK: node-sync ran as the DaemonSet pod and captured a pod-native overlay edit"
+echo "OK: node-sync ran as the DaemonSet pod and captured fixture + repo-lower pod-native overlay edits"

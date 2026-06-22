@@ -3,13 +3,18 @@
 //! Contract:
 //! `provision-overlay --session <id> [--overlays-root /var/lib/centaur/overlays]
 //!   [--merged-root /run/centaur/merged] [--lower <dir>] [--harness <kind>]
-//!   [--harness-thread-id <id>] [--harness-home <path>] [--repo <url-or-path>]
+//!   [--harness-thread-id <id>] [--harness-home <path>] [--repo <path>]
 //!   [--agent-uid <uid>]`
 //!
 //! It prepares the host-backed upper the node-sync daemon scans, creates a seed
-//! lower, mounts the merged workspace using the same overlay options as
-//! ci/overlay-validation.sh, and always writes the node-sync sidecar manifest at
-//! `<overlays-root>/.sessions/<session>.json`.
+//! lower when no repo is provided, mounts the merged workspace using the same
+//! overlay options as ci/overlay-validation.sh, and always writes the node-sync
+//! sidecar manifest at `<overlays-root>/.sessions/<session>.json`.
+//!
+//! Lower precedence:
+//! - Non-empty `--repo <path>` wins and is mounted as the read-only lowerdir.
+//! - Without `--repo`, `--lower <dir>` is the fixture lower override.
+//! - Without either, the fixture lower is `<host-root>/overlay-lower/<session>`.
 
 use centaur_node_sync::session_manifest::{SessionManifest, normalize_harness, write_manifest};
 use std::ffi::OsString;
@@ -29,6 +34,24 @@ struct Config {
     agent_uid: Option<u32>,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum LowerKind {
+    Fixture,
+    Repo,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct LowerSource {
+    path: PathBuf,
+    kind: LowerKind,
+}
+
+impl LowerSource {
+    fn uses_fixture_seed(&self) -> bool {
+        self.kind == LowerKind::Fixture
+    }
+}
+
 fn main() {
     if let Err(e) = run() {
         eprintln!("provision-overlay: {e}");
@@ -46,15 +69,18 @@ fn run() -> Result<(), String> {
         .parent()
         .ok_or_else(|| format!("{} has no parent", cfg.overlays_root.display()))?;
     let work = host_root.join("overlay-work").join(&cfg.session);
-    let lower = cfg
-        .lower
-        .unwrap_or_else(|| host_root.join("overlay-lower").join(&cfg.session));
+    let lower_source =
+        select_lower_source(&cfg.repo, cfg.lower.as_deref(), host_root, &cfg.session)?;
+    let lower_source = resolve_lower_source(lower_source)?;
+    let lower = lower_source.path.clone();
     let merged = cfg.merged_root.join(&cfg.session);
 
     std::fs::create_dir_all(&upper)
         .map_err(|e| format!("create upper {}: {e}", upper.display()))?;
-    std::fs::create_dir_all(&lower)
-        .map_err(|e| format!("create lower {}: {e}", lower.display()))?;
+    if lower_source.uses_fixture_seed() {
+        std::fs::create_dir_all(&lower)
+            .map_err(|e| format!("create lower {}: {e}", lower.display()))?;
+    }
     std::fs::create_dir_all(&merged)
         .map_err(|e| format!("create merged {}: {e}", merged.display()))?;
 
@@ -68,6 +94,11 @@ fn run() -> Result<(), String> {
         }
     }
 
+    let manifest_repo = match lower_source.kind {
+        LowerKind::Repo => lower.to_string_lossy().into_owned(),
+        LowerKind::Fixture => cfg.repo.clone(),
+    };
+
     write_manifest(
         &cfg.overlays_root,
         &SessionManifest {
@@ -76,11 +107,13 @@ fn run() -> Result<(), String> {
             harness: cfg.harness.clone(),
             harness_thread_id: cfg.harness_thread_id.clone(),
             harness_home: cfg.harness_home.clone(),
-            repo: cfg.repo.clone(),
+            repo: manifest_repo,
         },
     )?;
 
-    seed_lower(&lower)?;
+    if lower_source.uses_fixture_seed() {
+        seed_lower(&lower)?;
+    }
 
     if is_overlay_mount(&merged)? {
         println!(
@@ -205,7 +238,7 @@ fn next_value(iter: &mut impl Iterator<Item = OsString>, flag: &str) -> Result<S
 
 fn print_help() {
     println!(
-        "usage: provision-overlay --session <ID> [--overlays-root PATH] [--merged-root PATH] [--lower PATH] [--harness claude|codex|null] [--harness-thread-id ID] [--harness-home PATH] [--repo URL_OR_PATH] [--agent-uid UID]"
+        "usage: provision-overlay --session <ID> [--overlays-root PATH] [--merged-root PATH] [--lower PATH] [--harness claude|codex|null] [--harness-thread-id ID] [--harness-home PATH] [--repo PATH] [--agent-uid UID]"
     );
 }
 
@@ -232,6 +265,73 @@ fn seed_lower(lower: &Path) -> Result<(), String> {
     write_if_missing(&lower.join("seed.txt"), b"base seed\n")?;
     write_if_missing(&lower.join("delete-me.txt"), b"delete me\n")?;
     set_fixture_permissions(lower)
+}
+
+fn select_lower_source(
+    repo: &str,
+    lower: Option<&Path>,
+    host_root: &Path,
+    session: &str,
+) -> Result<LowerSource, String> {
+    let repo = repo.trim();
+    if !repo.is_empty() {
+        validate_repo_path_syntax(repo)?;
+        return Ok(LowerSource {
+            path: PathBuf::from(repo),
+            kind: LowerKind::Repo,
+        });
+    }
+
+    Ok(LowerSource {
+        path: lower
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| host_root.join("overlay-lower").join(session)),
+        kind: LowerKind::Fixture,
+    })
+}
+
+fn resolve_lower_source(source: LowerSource) -> Result<LowerSource, String> {
+    if source.kind != LowerKind::Repo {
+        return Ok(source);
+    }
+
+    let metadata = std::fs::metadata(&source.path)
+        .map_err(|e| format!("--repo {}: {e}", source.path.display()))?;
+    if !metadata.is_dir() {
+        return Err(format!(
+            "--repo must be an existing directory, got {}",
+            source.path.display()
+        ));
+    }
+    let path = source
+        .path
+        .canonicalize()
+        .map_err(|e| format!("canonicalize --repo {}: {e}", source.path.display()))?;
+    Ok(LowerSource {
+        path,
+        kind: LowerKind::Repo,
+    })
+}
+
+fn validate_repo_path_syntax(repo: &str) -> Result<(), String> {
+    if repo.contains('\0') {
+        return Err("--repo must not contain NUL bytes".to_string());
+    }
+    let path = Path::new(repo);
+    let mut normal_components = 0usize;
+    for component in path.components() {
+        match component {
+            Component::Normal(_) => normal_components += 1,
+            Component::RootDir => {}
+            Component::CurDir | Component::ParentDir | Component::Prefix(_) => {
+                return Err("--repo must not contain . or .. components".to_string());
+            }
+        }
+    }
+    if normal_components == 0 {
+        return Err("--repo must name a directory".to_string());
+    }
+    Ok(())
 }
 
 fn write_if_missing(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -351,4 +451,77 @@ fn unescape_mountinfo(value: &str) -> String {
         i += 1;
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_repo_uses_fixture_default_lower() {
+        let selected =
+            select_lower_source("", None, Path::new("/var/lib/centaur"), "sess-1").unwrap();
+
+        assert_eq!(
+            selected,
+            LowerSource {
+                path: PathBuf::from("/var/lib/centaur/overlay-lower/sess-1"),
+                kind: LowerKind::Fixture,
+            }
+        );
+        assert!(selected.uses_fixture_seed());
+    }
+
+    #[test]
+    fn empty_repo_uses_fixture_lower_override() {
+        let selected = select_lower_source(
+            "  ",
+            Some(Path::new("/tmp/custom-lower")),
+            Path::new("/var/lib/centaur"),
+            "sess-1",
+        )
+        .unwrap();
+
+        assert_eq!(
+            selected,
+            LowerSource {
+                path: PathBuf::from("/tmp/custom-lower"),
+                kind: LowerKind::Fixture,
+            }
+        );
+        assert!(selected.uses_fixture_seed());
+    }
+
+    #[test]
+    fn repo_wins_over_fixture_lower_override() {
+        let selected = select_lower_source(
+            "/var/lib/centaur/repos/sess-1",
+            Some(Path::new("/tmp/custom-lower")),
+            Path::new("/var/lib/centaur"),
+            "sess-1",
+        )
+        .unwrap();
+
+        assert_eq!(
+            selected,
+            LowerSource {
+                path: PathBuf::from("/var/lib/centaur/repos/sess-1"),
+                kind: LowerKind::Repo,
+            }
+        );
+        assert!(!selected.uses_fixture_seed());
+    }
+
+    #[test]
+    fn repo_rejects_traversal_components() {
+        let err = select_lower_source(
+            "/var/lib/centaur/repos/../other",
+            None,
+            Path::new("/var/lib/centaur"),
+            "sess-1",
+        )
+        .unwrap_err();
+
+        assert!(err.contains(". or .."));
+    }
 }
