@@ -17,6 +17,11 @@
 //!      NODE_SYNC_HARNESS_HOME, NODE_SYNC_REPO, NODE_SYNC_STATE.
 //! Flags: --once, --interval <secs>, --overlays-root <path>.
 
+#[cfg(any(target_os = "linux", test))]
+fn scoped_atrium_root(atrium_root: &std::path::Path, session: &str) -> std::path::PathBuf {
+    atrium_root.join(session)
+}
+
 #[cfg(target_os = "linux")]
 fn main() {
     linux_daemon::main();
@@ -346,7 +351,7 @@ mod linux_daemon {
         inbound(session, state, echo, lease, &mut client);
         outbound(global, session, state, echo, &mut client);
         capture_repo_wip(session, state, &mut client);
-        materialize_atrium(global, state, &client);
+        materialize_atrium(global, session, state, &client);
         state
             .save(&session.state_file)
             .map_err(|e| format!("save state {}: {e}", session.state_file.display()))
@@ -652,10 +657,12 @@ mod linux_daemon {
 
     fn materialize_atrium(
         global: &GlobalConfig,
+        session: &SessionConfig,
         state: &mut DaemonState,
         client: &HttpAtriumClient,
     ) {
-        match materialize_once(client, &global.atrium_root, &state.atrium_cursor) {
+        let atrium_root = super::scoped_atrium_root(&global.atrium_root, &session.session);
+        match materialize_once(client, &atrium_root, &state.atrium_cursor) {
             Ok(next) => {
                 if next != state.atrium_cursor {
                     println!("atrium materializer: cursor={next}");
@@ -716,4 +723,18 @@ mod linux_daemon {
 fn main() {
     eprintln!("centaur-node-syncd runs on linux nodes only");
     std::process::exit(1);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn scoped_atrium_root_is_scoped_under_viewer_session() {
+        assert_eq!(
+            scoped_atrium_root(Path::new("/var/lib/centaur/atrium"), "asbx-test"),
+            PathBuf::from("/var/lib/centaur/atrium/asbx-test")
+        );
+    }
 }
