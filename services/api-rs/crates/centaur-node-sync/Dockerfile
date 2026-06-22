@@ -9,11 +9,13 @@ RUN cargo build --release -p centaur-node-sync --bins
 
 FROM debian:bookworm-slim
 # The daemon needs coreutils + libc (dynamically linked) + CA certs for egress TLS.
+# provision-overlay shells out to mount(8) from the privileged init container.
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates \
+  && apt-get install -y --no-install-recommends ca-certificates mount \
   && rm -rf /var/lib/apt/lists/*
 COPY --from=build /work/target/release/centaur-node-syncd /usr/local/bin/centaur-node-syncd
 COPY --from=build /work/target/release/scan-demo /usr/local/bin/scan-demo
+COPY --from=build /work/target/release/provision-overlay /usr/local/bin/provision-overlay
 # Runs privileged (overlay xattr reads + write-through-merged); the DaemonSet sets
 # securityContext.privileged=true. No USER drop here — node-root is required.
 ENTRYPOINT ["/usr/local/bin/centaur-node-syncd"]
