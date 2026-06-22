@@ -3,7 +3,7 @@ name: Console CI
 on:
   pull_request:
   push:
-    branches: [ main ]
+    branches: [ main, atrium/integration ]
 
 defaults:
   run:

@@ -3,6 +3,8 @@ name: CI
 on:
   pull_request:
     branches: [main]
+  push:
+    branches: [main, atrium/integration]
   merge_group:
 
 concurrency:
@@ -91,7 +93,17 @@ jobs:
           persist-credentials: false
 
       - name: Check migration versions
-        run: .github/scripts/check-migration-order.sh "origin/${{ github.base_ref || 'main' }}"
+        run: |
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            base="${{ github.event.before }}"
+            if [[ "$base" =~ ^0+$ ]]; then
+              base="HEAD~1"
+            fi
+          else
+            base="origin/${{ github.base_ref || 'main' }}"
+          fi
+
+          .github/scripts/check-migration-order.sh "$base"
 
   rust-api:
     name: Rust API fmt, clippy, and tests
@@ -149,7 +161,7 @@ jobs:
             paradedb/paradedb:0.23.0-pg16 \
             -c shared_preload_libraries=pg_search,pg_cron \
             -c max_connections=500
-          for attempt in {1..60}; do
+          for _ in {1..60}; do
             if docker logs centaur-api-integration-test-postgres 2>&1 \
               | grep -q 'PostgreSQL init process complete' \
               && docker exec centaur-api-integration-test-postgres \

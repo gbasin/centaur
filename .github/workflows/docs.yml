@@ -7,7 +7,7 @@ on:
       - .github/workflows/docs.yml
       - docs/**
   push:
-    branches: [main]
+    branches: [main, atrium/integration]
     paths:
       - .github/workflows/docs.yml
       - docs/**
@@ -66,7 +66,7 @@ jobs:
         run: echo "Cloudflare credentials are not configured; docs build completed without deployment."
 
       - name: Deploy
-        if: github.event_name != 'pull_request'
+        if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref_name == 'main') }}
         uses: cloudflare/wrangler-action@9acf94ace14e7dc412b076f2c5c20b8ce93c79cd # v3.15.0
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}

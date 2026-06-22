@@ -10,6 +10,7 @@ name: Release Chart
   push:
     branches:
       - main
+      - atrium/integration
     paths:
       - "contrib/chart/**"
       - ".github/workflows/release-chart.yml"
@@ -34,7 +35,7 @@ jobs:
           git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
 
       - name: Bootstrap gh-pages branch
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && github.ref_name == 'main'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -98,7 +99,7 @@ jobs:
           exit 1
 
       - name: Run chart-releaser
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && github.ref_name == 'main'
         uses: helm/chart-releaser-action@cae68fefc6b5f367a0275617c9f83181ba54714f # v1.7.0
         with:
           skip_existing: true
