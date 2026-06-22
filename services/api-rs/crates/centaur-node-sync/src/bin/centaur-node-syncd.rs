@@ -22,6 +22,55 @@ fn scoped_atrium_root(atrium_root: &std::path::Path, session: &str) -> std::path
     atrium_root.join(session)
 }
 
+#[cfg(any(target_os = "linux", test))]
+#[derive(Clone)]
+struct SessionConfig {
+    session: String,
+    upper: std::path::PathBuf,
+    merged: std::path::PathBuf,
+    harness: Option<centaur_node_sync::runtime::HarnessTranscriptKind>,
+    harness_thread_id: String,
+    harness_home: String,
+    repo: String,
+    repo_name: String,
+    state_file: std::path::PathBuf,
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn session_config_from_discovered(
+    discovered: &centaur_node_sync::session_manifest::DiscoveredSession,
+    mounted: &centaur_node_sync::overlay_mount::OverlayMountPlan,
+) -> SessionConfig {
+    let repo = discovered.manifest.repo.clone();
+    SessionConfig {
+        session: discovered.session.clone(),
+        upper: mounted.upper.clone(),
+        merged: discovered.manifest.merged.clone(),
+        harness: discovered
+            .manifest
+            .harness
+            .as_deref()
+            .and_then(centaur_node_sync::runtime::HarnessTranscriptKind::parse),
+        harness_thread_id: discovered.manifest.harness_thread_id.clone(),
+        harness_home: discovered.manifest.harness_home.clone(),
+        repo_name: repo_name(&repo),
+        repo,
+        state_file: discovered.state_file.clone(),
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn repo_name(repo: &str) -> String {
+    if repo.is_empty() {
+        String::new()
+    } else {
+        std::path::Path::new(repo)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "repo".to_string())
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn main() {
     linux_daemon::main();
@@ -29,6 +78,7 @@ fn main() {
 
 #[cfg(target_os = "linux")]
 mod linux_daemon {
+    use super::{SessionConfig, repo_name, session_config_from_discovered};
     use centaur_node_sync::backpressure;
     use centaur_node_sync::backpressure::Budget;
     use centaur_node_sync::echo::EchoGuard;
@@ -43,7 +93,7 @@ mod linux_daemon {
         AtriumClient, HarnessTranscriptKind, UpperReader, capture_sweep, harness_transcript_sweep,
         inbound_sweep, partition_entries_by_lane, sha_hex,
     };
-    use centaur_node_sync::session_manifest::{DiscoveredSession, discover_sessions};
+    use centaur_node_sync::session_manifest::discover_sessions;
     use centaur_node_sync::state::DaemonState;
     use std::collections::{HashMap, HashSet};
     use std::path::{Path, PathBuf};
@@ -61,19 +111,6 @@ mod linux_daemon {
         atrium_root: PathBuf,
         budget: Budget,
         large_threshold: u64,
-    }
-
-    #[derive(Clone)]
-    struct SessionConfig {
-        session: String,
-        upper: PathBuf,
-        merged: PathBuf,
-        harness: Option<HarnessTranscriptKind>,
-        harness_thread_id: String,
-        harness_home: String,
-        repo: String,
-        repo_name: String,
-        state_file: PathBuf,
     }
 
     struct HardenedReader {
@@ -244,36 +281,6 @@ mod linux_daemon {
         })
     }
 
-    fn session_config_from_discovered(discovered: &DiscoveredSession) -> SessionConfig {
-        let repo = discovered.manifest.repo.clone();
-        SessionConfig {
-            session: discovered.session.clone(),
-            upper: discovered.upper.clone(),
-            merged: discovered.manifest.merged.clone(),
-            harness: discovered
-                .manifest
-                .harness
-                .as_deref()
-                .and_then(HarnessTranscriptKind::parse),
-            harness_thread_id: discovered.manifest.harness_thread_id.clone(),
-            harness_home: discovered.manifest.harness_home.clone(),
-            repo_name: repo_name(&repo),
-            repo,
-            state_file: discovered.state_file.clone(),
-        }
-    }
-
-    fn repo_name(repo: &str) -> String {
-        if repo.is_empty() {
-            String::new()
-        } else {
-            Path::new(repo)
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "repo".to_string())
-        }
-    }
-
     fn run_single_session(
         global: GlobalConfig,
         session: SessionConfig,
@@ -327,6 +334,7 @@ mod linux_daemon {
                             &discovered.session,
                             &discovered.manifest.merged,
                             &discovered.manifest.repo,
+                            &discovered.manifest.repos,
                             None,
                         ) {
                             Ok(plan) => plan,
@@ -343,9 +351,16 @@ mod linux_daemon {
                                 continue;
                             }
                         };
+                        let session = session_config_from_discovered(&discovered, &mounted);
                         mounted_overlays.insert(discovered.session.clone(), mounted);
-
-                        let session = session_config_from_discovered(&discovered);
+                        let first_seen = !states.contains_key(&session.session);
+                        if first_seen {
+                            eprintln!(
+                                "session {}: scan upper={}",
+                                session.session,
+                                session.upper.display()
+                            );
+                        }
                         let state = states
                             .entry(session.session.clone())
                             .or_insert_with(|| DaemonState::load(&session.state_file));
@@ -778,6 +793,8 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use centaur_node_sync::overlay_mount::{LowerKind, LowerSource, plan_overlay_mount};
+    use centaur_node_sync::session_manifest::{DiscoveredSession, RepoMount, SessionManifest};
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -785,6 +802,82 @@ mod tests {
         assert_eq!(
             scoped_atrium_root(Path::new("/var/lib/centaur/atrium"), "asbx-test"),
             PathBuf::from("/var/lib/centaur/atrium/asbx-test")
+        );
+    }
+
+    #[test]
+    fn multi_repo_scan_upper_comes_from_overlay_plan_not_composed_lower() {
+        let overlays_root = Path::new("/var/lib/centaur/overlays");
+        let session = "sess-multi";
+        let repos = vec![
+            RepoMount {
+                repo: "acme/foo".to_string(),
+                r#ref: None,
+                subdir: None,
+            },
+            RepoMount {
+                repo: "acme/bar".to_string(),
+                r#ref: None,
+                subdir: None,
+            },
+        ];
+        let mounted = plan_overlay_mount(
+            overlays_root,
+            session,
+            Path::new("/run/centaur/merged/sess-multi"),
+            "",
+            &repos,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            mounted.lower,
+            LowerSource {
+                path: PathBuf::from("/var/lib/centaur/overlay-lower/sess-multi.repos"),
+                kind: LowerKind::ComposedRepos,
+            }
+        );
+
+        let discovered = DiscoveredSession {
+            session: session.to_string(),
+            upper: mounted.lower.path.clone(),
+            state_file: PathBuf::from("/var/lib/centaur/overlays/.sessions/sess-multi.state.json"),
+            manifest: SessionManifest {
+                session: session.to_string(),
+                merged: PathBuf::from("/run/centaur/merged/sess-multi"),
+                harness: Some("codex".to_string()),
+                harness_thread_id: "thread-123".to_string(),
+                harness_home: ".codex".to_string(),
+                repo: String::new(),
+                repos,
+                agent_uid: 1001,
+            },
+        };
+
+        let session_config = session_config_from_discovered(&discovered, &mounted);
+
+        assert_eq!(session_config.session, session);
+        assert_eq!(
+            session_config.upper,
+            PathBuf::from("/var/lib/centaur/overlays/sess-multi")
+        );
+        assert_ne!(session_config.upper, mounted.lower.path);
+        assert_eq!(
+            session_config.merged,
+            PathBuf::from("/run/centaur/merged/sess-multi")
+        );
+        assert_eq!(
+            session_config.harness,
+            Some(centaur_node_sync::runtime::HarnessTranscriptKind::Codex)
+        );
+        assert_eq!(session_config.harness_thread_id, "thread-123");
+        assert_eq!(session_config.harness_home, ".codex");
+        assert_eq!(session_config.repo, "");
+        assert_eq!(session_config.repo_name, "");
+        assert_eq!(
+            session_config.state_file,
+            PathBuf::from("/var/lib/centaur/overlays/.sessions/sess-multi.state.json")
         );
     }
 }

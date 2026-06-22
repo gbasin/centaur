@@ -108,6 +108,7 @@ async fn main() -> Result<()> {
                     "source": "centaur-session-cli",
                 })),
                 on_harness_conflict: None,
+                repos: Vec::new(),
             },
         )
         .await

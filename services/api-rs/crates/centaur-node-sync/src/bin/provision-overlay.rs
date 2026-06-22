@@ -4,7 +4,7 @@
 //! `provision-overlay --session <id> [--manifest-only]
 //!   [--overlays-root /var/lib/centaur/overlays] [--merged-root /run/centaur/merged]
 //!   [--lower <dir>] [--harness <kind>] [--harness-thread-id <id>]
-//!   [--harness-home <path>] [--repo <path>] [--agent-uid <uid>]`
+//!   [--harness-home <path>] [--repo <path>] [--repos-json <json>] [--agent-uid <uid>]`
 //!
 //! Default mode preserves the legacy privileged provisioner path: prepare the
 //! host-backed upper, create the fixture lower when no repo is provided, mount
@@ -22,7 +22,9 @@
 use centaur_node_sync::overlay_mount::{
     DEFAULT_AGENT_UID, LowerKind, mount_overlay, plan_overlay_mount,
 };
-use centaur_node_sync::session_manifest::{SessionManifest, normalize_harness, write_manifest};
+use centaur_node_sync::session_manifest::{
+    RepoMount, SessionManifest, normalize_harness, write_manifest,
+};
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 
@@ -37,6 +39,7 @@ struct Config {
     harness_thread_id: String,
     harness_home: String,
     repo: String,
+    repos: Vec<RepoMount>,
     agent_uid: Option<u32>,
 }
 
@@ -57,6 +60,7 @@ fn run() -> Result<(), String> {
         &cfg.session,
         &merged,
         &cfg.repo,
+        &cfg.repos,
         cfg.lower.as_deref(),
     )?;
 
@@ -83,7 +87,7 @@ fn run() -> Result<(), String> {
 
     let manifest_repo = match plan.lower.kind {
         LowerKind::Repo => plan.lower.path.to_string_lossy().into_owned(),
-        LowerKind::Fixture => cfg.repo.clone(),
+        LowerKind::Fixture | LowerKind::ComposedRepos => cfg.repo.clone(),
     };
     write_manifest(
         &cfg.overlays_root,
@@ -94,6 +98,7 @@ fn run() -> Result<(), String> {
             harness_thread_id: cfg.harness_thread_id.clone(),
             harness_home: cfg.harness_home.clone(),
             repo: manifest_repo,
+            repos: cfg.repos.clone(),
             agent_uid: cfg.agent_uid.unwrap_or(DEFAULT_AGENT_UID),
         },
     )?;
@@ -119,6 +124,7 @@ fn run() -> Result<(), String> {
                 harness_thread_id: cfg.harness_thread_id.clone(),
                 harness_home: cfg.harness_home.clone(),
                 repo: mounted.lower.path.to_string_lossy().into_owned(),
+                repos: cfg.repos.clone(),
                 agent_uid: cfg.agent_uid.unwrap_or(DEFAULT_AGENT_UID),
             },
         )?;
@@ -147,6 +153,7 @@ where
     let mut harness_thread_id = String::new();
     let mut harness_home = String::new();
     let mut repo = String::new();
+    let mut repos = Vec::new();
     let mut agent_uid = None;
 
     let mut iter = args.into_iter();
@@ -183,6 +190,11 @@ where
             "--repo" => {
                 repo = next_value(&mut iter, "--repo")?;
             }
+            "--repos-json" => {
+                let value = next_value(&mut iter, "--repos-json")?;
+                repos = serde_json::from_str::<Vec<RepoMount>>(&value)
+                    .map_err(|e| format!("--repos-json must be a JSON array of repo specs: {e}"))?;
+            }
             "--agent-uid" => {
                 let value = next_value(&mut iter, "--agent-uid")?;
                 agent_uid = Some(value.parse::<u32>().map_err(|_| {
@@ -207,6 +219,7 @@ where
         harness_thread_id,
         harness_home,
         repo,
+        repos,
         agent_uid,
     })
 }
@@ -220,7 +233,7 @@ fn next_value(iter: &mut impl Iterator<Item = OsString>, flag: &str) -> Result<S
 
 fn print_help() {
     println!(
-        "usage: provision-overlay --session <ID> [--manifest-only] [--overlays-root PATH] [--merged-root PATH] [--lower PATH] [--harness claude|codex|null] [--harness-thread-id ID] [--harness-home PATH] [--repo PATH] [--agent-uid UID]"
+        "usage: provision-overlay --session <ID> [--manifest-only] [--overlays-root PATH] [--merged-root PATH] [--lower PATH] [--harness claude|codex|null] [--harness-thread-id ID] [--harness-home PATH] [--repo PATH] [--repos-json JSON] [--agent-uid UID]"
     );
 }
 
@@ -261,5 +274,35 @@ mod tests {
         assert!(cfg.manifest_only);
         assert_eq!(cfg.session, "sess-1");
         assert_eq!(cfg.agent_uid, Some(4242));
+    }
+
+    #[test]
+    fn parse_repos_json() {
+        let cfg = parse_args([
+            OsString::from("--manifest-only"),
+            OsString::from("--session"),
+            OsString::from("sess-1"),
+            OsString::from("--repos-json"),
+            OsString::from(
+                r#"[{"repo":"acme/foo","ref":"main"},{"repo":"acme/bar","subdir":"bar"}]"#,
+            ),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            cfg.repos,
+            vec![
+                RepoMount {
+                    repo: "acme/foo".to_string(),
+                    r#ref: Some("main".to_string()),
+                    subdir: None,
+                },
+                RepoMount {
+                    repo: "acme/bar".to_string(),
+                    r#ref: None,
+                    subdir: Some("bar".to_string()),
+                },
+            ]
+        );
     }
 }

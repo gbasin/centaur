@@ -4,15 +4,21 @@
 //! off-node. The actual mount/umount operations are Linux-only and are called by
 //! the privileged node-sync daemon.
 
+use crate::session_manifest::{
+    RepoMount, validate_repo_cache_path_syntax, validate_repo_mounts, validate_repo_subdir_syntax,
+};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
 pub const DEFAULT_AGENT_UID: u32 = 1001;
 pub const READY_MARKER_FILE: &str = ".centaur-workspace-ready";
+pub const DEFAULT_REPO_CACHE_ROOT: &str = "/cache";
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum LowerKind {
     Fixture,
     Repo,
+    ComposedRepos,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -34,6 +40,8 @@ pub struct OverlayMountPlan {
     pub merged: PathBuf,
     pub work: PathBuf,
     pub lower: LowerSource,
+    pub repo_mounts: Vec<RepoMount>,
+    pub repo_cache_root: PathBuf,
 }
 
 impl OverlayMountPlan {
@@ -51,27 +59,51 @@ pub fn plan_overlay_mount(
     session: &str,
     merged: &Path,
     repo: &str,
+    repos: &[RepoMount],
     lower_override: Option<&Path>,
 ) -> Result<OverlayMountPlan, String> {
     let host_root = overlays_root
         .parent()
         .ok_or_else(|| format!("{} has no parent", overlays_root.display()))?;
-    let lower = select_lower_source(repo, lower_override, host_root, session)?;
+    let lower = select_lower_source(repo, repos, lower_override, host_root, session)?;
+    let repo_mounts = if lower.kind == LowerKind::ComposedRepos {
+        plan_repo_composition(&lower.path, Path::new(DEFAULT_REPO_CACHE_ROOT), repos)?
+            .entries
+            .into_iter()
+            .map(|entry| entry.mount)
+            .collect()
+    } else {
+        Vec::new()
+    };
     Ok(OverlayMountPlan {
         session: session.to_owned(),
         upper: overlays_root.join(session),
         merged: merged.to_path_buf(),
         work: host_root.join("overlay-work").join(session),
         lower,
+        repo_mounts,
+        repo_cache_root: PathBuf::from(DEFAULT_REPO_CACHE_ROOT),
     })
 }
 
 pub fn select_lower_source(
     repo: &str,
+    repos: &[RepoMount],
     lower_override: Option<&Path>,
     host_root: &Path,
     session: &str,
 ) -> Result<LowerSource, String> {
+    if !repos.is_empty() {
+        let lower = host_root
+            .join("overlay-lower")
+            .join(format!("{session}.repos"));
+        plan_repo_composition(&lower, Path::new(DEFAULT_REPO_CACHE_ROOT), repos)?;
+        return Ok(LowerSource {
+            path: lower,
+            kind: LowerKind::ComposedRepos,
+        });
+    }
+
     let repo = repo.trim();
     if !repo.is_empty() {
         validate_repo_path_syntax(repo)?;
@@ -108,6 +140,75 @@ pub fn validate_repo_path_syntax(repo: &str) -> Result<(), String> {
         return Err("--repo must name a directory".to_string());
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct RepoComposePlan {
+    pub lower: PathBuf,
+    pub entries: Vec<RepoComposeEntry>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct RepoComposeEntry {
+    pub mount: RepoMount,
+    pub cache_path: PathBuf,
+    pub target_path: PathBuf,
+    pub target_subdir: String,
+}
+
+pub fn plan_repo_composition(
+    lower: &Path,
+    repo_cache_root: &Path,
+    repos: &[RepoMount],
+) -> Result<RepoComposePlan, String> {
+    validate_repo_mounts(repos)?;
+    let mut seen_specs = BTreeSet::new();
+    let mut target_owners: BTreeMap<String, String> = BTreeMap::new();
+    let mut entries = Vec::new();
+
+    for mount in repos {
+        let key = (
+            mount.repo.clone(),
+            mount.r#ref.clone(),
+            mount.subdir.clone(),
+        );
+        if !seen_specs.insert(key) {
+            continue;
+        }
+
+        let target_subdir = repo_target_subdir(mount)?;
+        if let Some(existing) = target_owners.insert(target_subdir.clone(), mount.repo.clone()) {
+            return Err(format!(
+                "multiple repos target workspace subdir {target_subdir:?}: {existing:?} and {:?}",
+                mount.repo
+            ));
+        }
+
+        entries.push(RepoComposeEntry {
+            mount: mount.clone(),
+            cache_path: repo_cache_root.join(&mount.repo),
+            target_path: lower.join(&target_subdir),
+            target_subdir,
+        });
+    }
+
+    Ok(RepoComposePlan {
+        lower: lower.to_path_buf(),
+        entries,
+    })
+}
+
+pub fn repo_target_subdir(mount: &RepoMount) -> Result<String, String> {
+    if let Some(subdir) = mount.subdir.as_deref() {
+        validate_repo_subdir_syntax(subdir)?;
+        return Ok(subdir.to_owned());
+    }
+    validate_repo_cache_path_syntax(&mount.repo)?;
+    Path::new(&mount.repo)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| format!("repo {:?} has no basename for workspace subdir", mount.repo))
 }
 
 pub fn overlay_options(lower: &Path, upper: &Path, work: &Path) -> String {
@@ -174,8 +275,7 @@ pub fn mount_overlay(
 ) -> Result<OverlayMountPlan, String> {
     use std::process::Command;
 
-    let plan = resolve_lower_source(plan)?;
-    prepare_mount_dirs(&plan, agent_uid)?;
+    prepare_upper_and_merged(&plan, agent_uid)?;
     if is_overlay_mount(&plan.merged)? {
         write_ready_marker(&plan.merged)?;
         println!(
@@ -186,6 +286,8 @@ pub fn mount_overlay(
         return Ok(plan);
     }
 
+    let plan = resolve_lower_source(plan)?;
+    prepare_lower_source(&plan)?;
     reset_workdir(&plan.work)?;
     let opts = plan.overlay_options();
     let output = Command::new("mount")
@@ -258,35 +360,30 @@ pub fn unmount_overlay(_plan: &OverlayMountPlan) -> Result<(), String> {
 
 #[cfg(target_os = "linux")]
 fn resolve_lower_source(mut plan: OverlayMountPlan) -> Result<OverlayMountPlan, String> {
-    if plan.lower.kind != LowerKind::Repo {
-        return Ok(plan);
+    match plan.lower.kind {
+        LowerKind::Fixture | LowerKind::ComposedRepos => Ok(plan),
+        LowerKind::Repo => {
+            let metadata = std::fs::metadata(&plan.lower.path)
+                .map_err(|e| format!("--repo {}: {e}", plan.lower.path.display()))?;
+            if !metadata.is_dir() {
+                return Err(format!(
+                    "--repo must be an existing directory, got {}",
+                    plan.lower.path.display()
+                ));
+            }
+            plan.lower.path =
+                plan.lower.path.canonicalize().map_err(|e| {
+                    format!("canonicalize --repo {}: {e}", plan.lower.path.display())
+                })?;
+            Ok(plan)
+        }
     }
-
-    let metadata = std::fs::metadata(&plan.lower.path)
-        .map_err(|e| format!("--repo {}: {e}", plan.lower.path.display()))?;
-    if !metadata.is_dir() {
-        return Err(format!(
-            "--repo must be an existing directory, got {}",
-            plan.lower.path.display()
-        ));
-    }
-    plan.lower.path = plan
-        .lower
-        .path
-        .canonicalize()
-        .map_err(|e| format!("canonicalize --repo {}: {e}", plan.lower.path.display()))?;
-    Ok(plan)
 }
 
 #[cfg(target_os = "linux")]
-fn prepare_mount_dirs(plan: &OverlayMountPlan, agent_uid: Option<u32>) -> Result<(), String> {
+fn prepare_upper_and_merged(plan: &OverlayMountPlan, agent_uid: Option<u32>) -> Result<(), String> {
     std::fs::create_dir_all(&plan.upper)
         .map_err(|e| format!("create upper {}: {e}", plan.upper.display()))?;
-    if plan.lower.uses_fixture_seed() {
-        std::fs::create_dir_all(&plan.lower.path)
-            .map_err(|e| format!("create lower {}: {e}", plan.lower.path.display()))?;
-        seed_fixture_lower(&plan.lower.path)?;
-    }
     std::fs::create_dir_all(&plan.merged)
         .map_err(|e| format!("create merged {}: {e}", plan.merged.display()))?;
 
@@ -295,6 +392,212 @@ fn prepare_mount_dirs(plan: &OverlayMountPlan, agent_uid: Option<u32>) -> Result
         None => set_dir_mode(&plan.upper, 0o777)?,
     }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn prepare_lower_source(plan: &OverlayMountPlan) -> Result<(), String> {
+    if plan.lower.uses_fixture_seed() {
+        std::fs::create_dir_all(&plan.lower.path)
+            .map_err(|e| format!("create lower {}: {e}", plan.lower.path.display()))?;
+        seed_fixture_lower(&plan.lower.path)?;
+    }
+    if plan.lower.kind == LowerKind::ComposedRepos {
+        materialize_composed_lower(plan)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn materialize_composed_lower(plan: &OverlayMountPlan) -> Result<(), String> {
+    let compose =
+        plan_repo_composition(&plan.lower.path, &plan.repo_cache_root, &plan.repo_mounts)?;
+    if compose.lower.exists() {
+        std::fs::remove_dir_all(&compose.lower)
+            .map_err(|e| format!("reset composed lower {}: {e}", compose.lower.display()))?;
+    }
+    std::fs::create_dir_all(&compose.lower)
+        .map_err(|e| format!("create composed lower {}: {e}", compose.lower.display()))?;
+
+    for entry in &compose.entries {
+        materialize_repo_entry(entry)?;
+    }
+    remove_write_permissions(&compose.lower)?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn materialize_repo_entry(entry: &RepoComposeEntry) -> Result<(), String> {
+    if let Some(parent) = entry.target_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("create repo target parent {}: {e}", parent.display()))?;
+    }
+
+    if entry.cache_path.join(".git").is_dir() {
+        copy_repo_from_cache(&entry.cache_path, &entry.target_path)?;
+    } else {
+        clone_repo(&entry.mount.repo, &entry.target_path)?;
+    }
+
+    if let Some(git_ref) = entry.mount.r#ref.as_deref() {
+        checkout_repo_ref(&entry.target_path, git_ref)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn copy_repo_from_cache(source: &Path, target: &Path) -> Result<(), String> {
+    use std::process::Command;
+
+    if target.exists() {
+        std::fs::remove_dir_all(target)
+            .map_err(|e| format!("reset repo target {}: {e}", target.display()))?;
+    }
+    std::fs::create_dir_all(target)
+        .map_err(|e| format!("create repo target {}: {e}", target.display()))?;
+    let source_contents = source.join(".");
+    let output = Command::new("cp")
+        .arg("-a")
+        .arg("--reflink=auto")
+        .arg(&source_contents)
+        .arg(target)
+        .output()
+        .map_err(|e| format!("spawn cp from repo-cache {}: {e}", source.display()))?;
+    if !output.status.success() {
+        return Err(format!(
+            "copy repo-cache {} -> {} failed (status {}): {}",
+            source.display(),
+            target.display(),
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn clone_repo(repo: &str, target: &Path) -> Result<(), String> {
+    use std::process::Command;
+
+    if target.exists() {
+        std::fs::remove_dir_all(target)
+            .map_err(|e| format!("reset repo target {}: {e}", target.display()))?;
+    }
+    let repo_url = format!("https://github.com/{repo}.git");
+    let output = Command::new("git")
+        .args(["clone", "--filter=blob:none", "--quiet"])
+        .arg(&repo_url)
+        .arg(target)
+        .output()
+        .map_err(|e| format!("spawn git clone {repo_url}: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git clone {repo_url} -> {} failed (status {}): {}",
+            target.display(),
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn checkout_repo_ref(repo_dir: &Path, git_ref: &str) -> Result<(), String> {
+    use std::process::Command;
+
+    let local_ref = format!("{git_ref}^{{commit}}");
+    let origin_ref = format!("origin/{git_ref}^{{commit}}");
+    let checkout_target = if git_verify_ref(repo_dir, &local_ref)? {
+        git_ref.to_owned()
+    } else if git_verify_ref(repo_dir, &origin_ref)? {
+        format!("origin/{git_ref}")
+    } else {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(repo_dir)
+            .args(["-c", "gc.auto=0", "fetch", "--depth=1", "origin", git_ref])
+            .output()
+            .map_err(|e| format!("spawn git fetch {git_ref} in {}: {e}", repo_dir.display()))?;
+        if !output.status.success() {
+            return Err(format!(
+                "git fetch {git_ref} in {} failed (status {}): {}",
+                repo_dir.display(),
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        "FETCH_HEAD".to_string()
+    };
+
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_dir)
+        .args(["checkout", "--quiet", "--detach"])
+        .arg(&checkout_target)
+        .output()
+        .map_err(|e| {
+            format!(
+                "spawn git checkout {checkout_target} in {}: {e}",
+                repo_dir.display()
+            )
+        })?;
+    if !output.status.success() {
+        return Err(format!(
+            "git checkout {checkout_target} in {} failed (status {}): {}",
+            repo_dir.display(),
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn git_verify_ref(repo_dir: &Path, git_ref: &str) -> Result<bool, String> {
+    use std::process::Command;
+
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(repo_dir)
+        .args(["rev-parse", "--verify", "--quiet", git_ref])
+        .status()
+        .map_err(|e| format!("spawn git rev-parse in {}: {e}", repo_dir.display()))?;
+    Ok(status.success())
+}
+
+#[cfg(target_os = "linux")]
+fn remove_write_permissions(root: &Path) -> Result<(), String> {
+    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+
+    fn visit(path: &Path) -> Result<(), String> {
+        let metadata =
+            std::fs::symlink_metadata(path).map_err(|e| format!("stat {}: {e}", path.display()))?;
+        let file_type = metadata.file_type();
+        if file_type.is_symlink() {
+            return Ok(());
+        }
+        if file_type.is_dir() {
+            for entry in
+                std::fs::read_dir(path).map_err(|e| format!("read dir {}: {e}", path.display()))?
+            {
+                let entry = entry.map_err(|e| format!("read dir entry {}: {e}", path.display()))?;
+                visit(&entry.path())?;
+            }
+            // Directories stay world-writable so the hardened non-root agent can
+            // create files in repo subdirs through overlay copy-up. The lower itself
+            // is never mutated -- new files and edits land in the overlay upper.
+            return std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o777))
+                .map_err(|e| format!("chmod composed dir {}: {e}", path.display()));
+        } else if !file_type.is_file() && !file_type.is_fifo() && !file_type.is_socket() {
+            return Ok(());
+        }
+
+        let mut perms = metadata.permissions();
+        perms.set_mode(perms.mode() & !0o222);
+        std::fs::set_permissions(path, perms)
+            .map_err(|e| format!("chmod read-only {}: {e}", path.display()))
+    }
+
+    visit(root)
 }
 
 #[cfg(target_os = "linux")]
@@ -405,6 +708,7 @@ mod tests {
             "sess-1",
             Path::new("/run/centaur/merged/sess-1"),
             "",
+            &[],
             None,
         )
         .unwrap();
@@ -433,6 +737,7 @@ mod tests {
             "sess-1",
             Path::new("/run/centaur/merged/sess-1"),
             "/var/lib/centaur/repos/sess-1",
+            &[],
             Some(Path::new("/tmp/lower")),
         )
         .unwrap();
@@ -466,6 +771,7 @@ mod tests {
     fn repo_rejects_traversal_components() {
         let err = select_lower_source(
             "/var/lib/centaur/repos/../other",
+            &[],
             None,
             Path::new("/var/lib/centaur"),
             "sess-1",
@@ -473,5 +779,106 @@ mod tests {
         .unwrap_err();
 
         assert!(err.contains(". or .."));
+    }
+
+    #[test]
+    fn multi_repo_plan_uses_composed_lower_and_dedupes_exact_repeats() {
+        let repos = vec![
+            RepoMount {
+                repo: "acme/foo".to_string(),
+                r#ref: Some("main".to_string()),
+                subdir: None,
+            },
+            RepoMount {
+                repo: "acme/foo".to_string(),
+                r#ref: Some("main".to_string()),
+                subdir: None,
+            },
+            RepoMount {
+                repo: "acme/bar".to_string(),
+                r#ref: None,
+                subdir: Some("libbar".to_string()),
+            },
+        ];
+        let plan = plan_overlay_mount(
+            Path::new("/var/lib/centaur/overlays"),
+            "sess-1",
+            Path::new("/run/centaur/merged/sess-1"),
+            "/ignored/single/repo",
+            &repos,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            plan.lower,
+            LowerSource {
+                path: PathBuf::from("/var/lib/centaur/overlay-lower/sess-1.repos"),
+                kind: LowerKind::ComposedRepos,
+            }
+        );
+        assert_eq!(plan.repo_mounts.len(), 2);
+        assert_eq!(plan.repo_cache_root, PathBuf::from(DEFAULT_REPO_CACHE_ROOT));
+    }
+
+    #[test]
+    fn compose_plan_maps_repos_to_cache_and_workspace_subdirs() {
+        let repos = vec![
+            RepoMount {
+                repo: "acme/foo".to_string(),
+                r#ref: None,
+                subdir: None,
+            },
+            RepoMount {
+                repo: "acme/bar".to_string(),
+                r#ref: Some("release/v1".to_string()),
+                subdir: Some("vendor-bar".to_string()),
+            },
+        ];
+        let plan = plan_repo_composition(Path::new("/lower"), Path::new("/cache"), &repos).unwrap();
+
+        assert_eq!(plan.entries[0].target_subdir, "foo");
+        assert_eq!(plan.entries[0].cache_path, PathBuf::from("/cache/acme/foo"));
+        assert_eq!(plan.entries[0].target_path, PathBuf::from("/lower/foo"));
+        assert_eq!(plan.entries[1].target_subdir, "vendor-bar");
+        assert_eq!(plan.entries[1].cache_path, PathBuf::from("/cache/acme/bar"));
+        assert_eq!(
+            plan.entries[1].target_path,
+            PathBuf::from("/lower/vendor-bar")
+        );
+    }
+
+    #[test]
+    fn compose_plan_rejects_target_collisions_and_traversal() {
+        let err = plan_repo_composition(
+            Path::new("/lower"),
+            Path::new("/cache"),
+            &[
+                RepoMount {
+                    repo: "acme/foo".to_string(),
+                    r#ref: None,
+                    subdir: None,
+                },
+                RepoMount {
+                    repo: "other/foo".to_string(),
+                    r#ref: None,
+                    subdir: None,
+                },
+            ],
+        )
+        .unwrap_err();
+        assert!(err.contains("target workspace subdir"));
+
+        let err = plan_repo_composition(
+            Path::new("/lower"),
+            Path::new("/cache"),
+            &[RepoMount {
+                repo: "/absolute/repo".to_string(),
+                r#ref: None,
+                subdir: Some("repo".to_string()),
+            }],
+        )
+        .unwrap_err();
+        assert!(err.contains("relative path"));
     }
 }

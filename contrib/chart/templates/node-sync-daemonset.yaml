@@ -71,6 +71,9 @@ spec:
             - name: merged
               mountPath: /run/centaur/merged
               mountPropagation: Bidirectional
+            - name: repo-cache
+              mountPath: /cache
+              readOnly: true
       volumes:
         - name: centaur-state
           hostPath:
@@ -79,6 +82,10 @@ spec:
         - name: merged
           hostPath:
             path: /run/centaur/merged
+            type: DirectoryOrCreate
+        - name: repo-cache
+          hostPath:
+            path: {{ .Values.repoCache.hostPath | quote }}
             type: DirectoryOrCreate
       tolerations:
         - operator: Exists                 # run on every node, incl. tainted ones

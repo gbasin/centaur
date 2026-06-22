@@ -151,6 +151,25 @@ impl PgSessionStore {
         row.try_into()
     }
 
+    pub async fn get_session_metadata(
+        &self,
+        thread_key: &ThreadKey,
+    ) -> Result<Value, SessionStoreError> {
+        sqlx::query_scalar::<_, Value>(
+            r#"
+            select metadata
+            from sessions
+            where thread_key = $1
+            "#,
+        )
+        .bind(thread_key.as_str())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| SessionStoreError::NotFound {
+            thread_key: thread_key.as_str().to_owned(),
+        })
+    }
+
     pub async fn append_messages(
         &self,
         thread_key: &ThreadKey,
