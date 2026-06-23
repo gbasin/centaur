@@ -448,6 +448,7 @@ nodeSync:
   # Interval (floor) scan of each upper; node-side fanotify adds sub-second
   # latency on top (the agent could never run it; the node is privileged).
   scanIntervalSeconds: 2
+  hydrateArtifacts: false
   # Atrium is reached egress-only; the node is trusted infra (not the sandbox),
   # so it bypasses the per-sandbox egress NetworkPolicy → big files go direct to S3.
   atriumBaseUrl: "http://atrium-server.atrium.svc:8080"
