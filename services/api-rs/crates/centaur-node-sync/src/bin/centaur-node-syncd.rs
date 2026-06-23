@@ -33,6 +33,7 @@ struct SessionConfig {
     harness_home: String,
     repo: String,
     repo_name: String,
+    repo_subdirs: Vec<std::path::PathBuf>,
     state_file: std::path::PathBuf,
 }
 
@@ -55,8 +56,20 @@ fn session_config_from_discovered(
         harness_home: discovered.manifest.harness_home.clone(),
         repo_name: repo_name(&repo),
         repo,
+        repo_subdirs: repo_lane_subdirs(&discovered.manifest.repos),
         state_file: discovered.state_file.clone(),
     }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn repo_lane_subdirs(
+    repos: &[centaur_node_sync::session_manifest::RepoMount],
+) -> Vec<std::path::PathBuf> {
+    repos
+        .iter()
+        .filter_map(|repo| centaur_node_sync::overlay_mount::repo_target_subdir(repo).ok())
+        .map(std::path::PathBuf::from)
+        .collect()
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -301,6 +314,7 @@ mod linux_daemon {
             harness_home: env("NODE_SYNC_HARNESS_HOME"),
             repo: env("NODE_SYNC_REPO"),
             repo_name: repo_name(&env("NODE_SYNC_REPO")),
+            repo_subdirs: Vec::new(),
             state_file,
         })
     }
@@ -646,7 +660,8 @@ mod linux_daemon {
                     upper: session.upper.clone(),
                 };
                 let harness_lane_homes = harness_lane_homes(&session.harness_home);
-                let partitioned = partition_entries_by_lane(&entries, &harness_lane_homes);
+                let partitioned =
+                    partition_entries_by_lane(&entries, &harness_lane_homes, &session.repo_subdirs);
                 eprintln!(
                     "session {}: entry lanes: artifact={}, harness_state={}, denied_dropped={}, total={}",
                     session.session,
@@ -944,6 +959,10 @@ mod tests {
         assert_eq!(session_config.harness_home, ".codex");
         assert_eq!(session_config.repo, "");
         assert_eq!(session_config.repo_name, "");
+        assert_eq!(
+            session_config.repo_subdirs,
+            vec![PathBuf::from("foo"), PathBuf::from("bar")]
+        );
         assert_eq!(
             session_config.state_file,
             PathBuf::from("/var/lib/centaur/overlays/.sessions/sess-multi.state.json")

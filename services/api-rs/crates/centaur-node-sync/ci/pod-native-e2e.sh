@@ -611,18 +611,22 @@ docker exec "${KIND_CLUSTER}-control-plane" sh -ceu \
    test ! -e "/var/lib/centaur/overlays/'"${MULTI_REPO_SESSION}"'/bar/bar.txt"'
 
 kubectl -n "${NS}" exec "${MULTI_REPO_AGENT_POD}" -c agent -- /bin/sh -ceu '
+  echo "created outside composed repos" > /workspace/outside-deliverable.txt
   echo "created through multi repo lower session" > /workspace/foo/agent-created.txt
+  test -f /workspace/outside-deliverable.txt
   test -f /workspace/foo/agent-created.txt
 '
 docker exec "${KIND_CLUSTER}-control-plane" sh -ceu \
-  'test -f "/var/lib/centaur/overlays/'"${MULTI_REPO_SESSION}"'/foo/agent-created.txt";
+  'test -f "/var/lib/centaur/overlays/'"${MULTI_REPO_SESSION}"'/outside-deliverable.txt";
+   test -f "/var/lib/centaur/overlays/'"${MULTI_REPO_SESSION}"'/foo/agent-created.txt";
    test ! -e "/var/lib/centaur/overlays/'"${MULTI_REPO_SESSION}"'/foo/foo.txt";
    test ! -e "/var/lib/centaur/overlays/'"${MULTI_REPO_SESSION}"'/bar/bar.txt"'
 echo "--- DIAG: multi node upper after nested write on ${KIND_CLUSTER}-control-plane ---"
 docker exec "${KIND_CLUSTER}-control-plane" sh -c \
   'echo "upper after nested write:"; find "/var/lib/centaur/overlays/'"${MULTI_REPO_SESSION}"'" -maxdepth 4 -mindepth 1 -print 2>&1 || true; echo "upper/foo:"; ls -la "/var/lib/centaur/overlays/'"${MULTI_REPO_SESSION}"'/foo" 2>&1 || true' || true
+# The in-repo write is upper-local overlay state, but repo roots are excluded from artifact capture.
 wait_for_log "session ${MULTI_REPO_SESSION}: capture: 1 upserts \\(0 streamed\\), 0 deletes" \
-  "multi-repo new-file-only capture"
+  "multi-repo outside-deliverable-only capture"
 
 echo "==> [8/9] provision a hydration session and assert artifact lower is live"
 kubectl -n "${NS}" delete pod "${HYDRATE_POD}" --ignore-not-found --wait=true

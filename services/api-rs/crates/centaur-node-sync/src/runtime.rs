@@ -177,11 +177,21 @@ pub struct PartitionedEntries {
     pub denied_count: usize,
 }
 
-pub fn classify_entry(rel_path: &Path, harness_homes: &[PathBuf]) -> EntryLane {
+pub fn classify_entry(
+    rel_path: &Path,
+    harness_homes: &[PathBuf],
+    repo_subdirs: &[PathBuf],
+) -> EntryLane {
     let Some(path_components) = normalized_path_components(rel_path) else {
         return EntryLane::Denied;
     };
     if is_denied_path(&path_components) {
+        return EntryLane::Denied;
+    }
+    if repo_subdirs
+        .iter()
+        .any(|subdir| first_component_matches_normalized_subdir(&path_components, subdir))
+    {
         return EntryLane::Denied;
     }
     if harness_homes
@@ -196,10 +206,11 @@ pub fn classify_entry(rel_path: &Path, harness_homes: &[PathBuf]) -> EntryLane {
 pub fn partition_entries_by_lane(
     entries: &[RawEntry],
     harness_homes: &[PathBuf],
+    repo_subdirs: &[PathBuf],
 ) -> PartitionedEntries {
     let mut partitioned = PartitionedEntries::default();
     for entry in entries {
-        match classify_entry(&entry.rel_path, harness_homes) {
+        match classify_entry(&entry.rel_path, harness_homes, repo_subdirs) {
             EntryLane::Artifact => partitioned.artifact_entries.push(entry.clone()),
             EntryLane::HarnessState => partitioned.harness_entries.push(entry.clone()),
             EntryLane::Denied => partitioned.denied_count += 1,
@@ -233,6 +244,16 @@ fn starts_with_normalized_components(path_components: &[String], home: &Path) ->
             .iter()
             .zip(home_components.iter())
             .all(|(path, home)| path == home)
+}
+
+fn first_component_matches_normalized_subdir(path_components: &[String], subdir: &Path) -> bool {
+    let Some(subdir_components) = normalized_path_components(subdir) else {
+        return false;
+    };
+    matches!(
+        subdir_components.as_slice(),
+        [repo_subdir] if path_components.first() == Some(repo_subdir)
+    )
 }
 
 fn is_denied_path(components: &[String]) -> bool {
@@ -539,51 +560,6 @@ pub fn wip_sweep(
     captured
 }
 
-/// One entry of the hydration manifest: the path + the version to materialize.
-#[derive(Debug, Clone)]
-pub struct HydrateEntry {
-    pub path: String,
-    pub seq: u64,
-}
-
-pub struct HydrateOutcome {
-    /// (path, base_seq) — the seed for `artifact_sync_state` + base-aware capture.
-    pub base_seqs: HashMap<String, u64>,
-    pub bytes_written: u64,
-    pub errors: Vec<(String, String)>,
-}
-
-/// Hydrate the artifact `lower` (Phase 5 / C-hydrate): for each manifest entry,
-/// fetch the version's bytes from Atrium and materialize them into the lowerdir
-/// tree (one file per path, creating parent dirs). The returned `base_seqs` IS the
-/// per-path base the capture sweep + adopt need. The live node reflinks from a
-/// node-local CAS cache instead of re-fetching; this is the correctness core.
-/// `write_file` is injected so the call flow is unit-tested without a real FS.
-pub fn hydrate_lower(
-    manifest: &[HydrateEntry],
-    client: &mut dyn AtriumClient,
-    mut write_file: impl FnMut(&str, &[u8]) -> Result<(), String>,
-) -> HydrateOutcome {
-    let mut out = HydrateOutcome {
-        base_seqs: HashMap::new(),
-        bytes_written: 0,
-        errors: vec![],
-    };
-    for entry in manifest {
-        match client.fetch_bytes(&entry.path, entry.seq) {
-            Ok(bytes) => match write_file(&entry.path, &bytes) {
-                Ok(()) => {
-                    out.bytes_written += bytes.len() as u64;
-                    out.base_seqs.insert(entry.path.clone(), entry.seq);
-                }
-                Err(e) => out.errors.push((entry.path.clone(), e)),
-            },
-            Err(e) => out.errors.push((entry.path.clone(), e)),
-        }
-    }
-    out
-}
-
 pub struct InboundPlan {
     /// Paths to write through `merged` with the fetched bytes (path, seq, bytes).
     pub to_write: Vec<(String, u64, Vec<u8>)>,
@@ -709,11 +685,15 @@ mod tests {
         let homes = vec![PathBuf::from(".claude"), PathBuf::from(".codex")];
 
         assert_eq!(
-            classify_entry(Path::new(".claude/projects/x/transcript.jsonl"), &homes),
+            classify_entry(
+                Path::new(".claude/projects/x/transcript.jsonl"),
+                &homes,
+                &[]
+            ),
             EntryLane::HarnessState
         );
         assert_eq!(
-            classify_entry(Path::new(".codex/sessions/y/rollout.jsonl"), &homes),
+            classify_entry(Path::new(".codex/sessions/y/rollout.jsonl"), &homes, &[]),
             EntryLane::HarnessState
         );
     }
@@ -732,7 +712,7 @@ mod tests {
             ".ssh/id_ed25519",
         ] {
             assert_eq!(
-                classify_entry(Path::new(path), &homes),
+                classify_entry(Path::new(path), &homes, &[]),
                 EntryLane::Denied,
                 "{path} should be denied"
             );
@@ -745,14 +725,14 @@ mod tests {
 
         for path in [".git/index", "foo/.git/HEAD"] {
             assert_eq!(
-                classify_entry(Path::new(path), &homes),
+                classify_entry(Path::new(path), &homes, &[]),
                 EntryLane::Denied,
                 "{path} should be denied"
             );
         }
         for path in ["report.md", "src/main.rs"] {
             assert_eq!(
-                classify_entry(Path::new(path), &homes),
+                classify_entry(Path::new(path), &homes, &[]),
                 EntryLane::Artifact,
                 "{path} should remain an artifact"
             );
@@ -764,12 +744,12 @@ mod tests {
         let homes = vec![PathBuf::from(".claude"), PathBuf::from(".codex")];
 
         assert_eq!(
-            classify_entry(Path::new("target/foo.o"), &homes),
+            classify_entry(Path::new("target/foo.o"), &homes, &[]),
             EntryLane::Denied
         );
         for path in ["report.pdf", "data.csv", "notes.md"] {
             assert_eq!(
-                classify_entry(Path::new(path), &homes),
+                classify_entry(Path::new(path), &homes, &[]),
                 EntryLane::Artifact,
                 "{path} should remain an artifact"
             );
@@ -781,11 +761,38 @@ mod tests {
         let homes = vec![PathBuf::from(".claude"), PathBuf::from(".codex")];
 
         assert_eq!(
-            classify_entry(Path::new("proj-x/note.md"), &homes),
+            classify_entry(Path::new("proj-x/note.md"), &homes, &[]),
             EntryLane::Artifact
         );
         assert_eq!(
-            classify_entry(Path::new("src/app.ts"), &homes),
+            classify_entry(Path::new("src/app.ts"), &homes, &[]),
+            EntryLane::Artifact
+        );
+    }
+
+    #[test]
+    fn classify_entry_denies_repo_subdir_working_tree_entries() {
+        let homes = vec![PathBuf::from(".claude"), PathBuf::from(".codex")];
+        let repo_subdirs = vec![PathBuf::from("foo")];
+
+        assert_eq!(
+            classify_entry(Path::new("foo/agent-created.txt"), &homes, &repo_subdirs),
+            EntryLane::Denied
+        );
+        assert_eq!(
+            classify_entry(Path::new("shared/foo"), &homes, &repo_subdirs),
+            EntryLane::Artifact
+        );
+        assert_eq!(
+            classify_entry(
+                Path::new("foo-report/agent-created.txt"),
+                &homes,
+                &repo_subdirs
+            ),
+            EntryLane::Artifact
+        );
+        assert_eq!(
+            classify_entry(Path::new("foo/agent-created.txt"), &homes, &[]),
             EntryLane::Artifact
         );
     }
@@ -795,13 +802,15 @@ mod tests {
         let entries = vec![
             reg("proj-x/note.md"),
             reg("src/app.ts"),
+            reg("foo/agent-created.txt"),
             reg(".codex/sessions/y/rollout.jsonl"),
             reg(".claude/projects/x/transcript.jsonl"),
             reg(".codex/auth.json"),
             reg(".ssh/id_ed25519"),
         ];
         let homes = vec![PathBuf::from(".claude"), PathBuf::from(".codex")];
-        let partitioned = partition_entries_by_lane(&entries, &homes);
+        let repo_subdirs = vec![PathBuf::from("foo")];
+        let partitioned = partition_entries_by_lane(&entries, &homes, &repo_subdirs);
         let artifact_paths: Vec<&Path> = partitioned
             .artifact_entries
             .iter()
@@ -813,7 +822,7 @@ mod tests {
             vec![Path::new("proj-x/note.md"), Path::new("src/app.ts")]
         );
         assert_eq!(partitioned.harness_entries.len(), 2);
-        assert_eq!(partitioned.denied_count, 2);
+        assert_eq!(partitioned.denied_count, 3);
 
         let mut files = HashMap::new();
         files.insert(PathBuf::from("proj-x/note.md"), b"note".to_vec());
@@ -1031,56 +1040,6 @@ mod tests {
             client.transcripts,
             vec![("claude".to_owned(), b"{\"type\":\"assistant\"}\n".to_vec())]
         );
-    }
-
-    #[test]
-    fn hydrate_lower_materializes_files_and_returns_base_seqs() {
-        let manifest = vec![
-            HydrateEntry {
-                path: "proj-x/plan.md".into(),
-                seq: 5,
-            },
-            HydrateEntry {
-                path: "shared/notes.md".into(),
-                seq: 2,
-            },
-        ];
-        let mut client = FakeClient::default();
-        let mut written: HashMap<String, Vec<u8>> = HashMap::new();
-        let out = hydrate_lower(&manifest, &mut client, |path, bytes| {
-            written.insert(path.to_string(), bytes.to_vec());
-            Ok(())
-        });
-        assert_eq!(out.base_seqs.get("proj-x/plan.md"), Some(&5));
-        assert_eq!(out.base_seqs.get("shared/notes.md"), Some(&2));
-        assert_eq!(written.len(), 2);
-        assert!(out.errors.is_empty());
-        assert!(out.bytes_written > 0);
-    }
-
-    #[test]
-    fn hydrate_lower_records_write_errors_without_aborting() {
-        let manifest = vec![
-            HydrateEntry {
-                path: "ok.md".into(),
-                seq: 1,
-            },
-            HydrateEntry {
-                path: "bad.md".into(),
-                seq: 1,
-            },
-        ];
-        let mut client = FakeClient::default();
-        let out = hydrate_lower(&manifest, &mut client, |path, _bytes| {
-            if path == "bad.md" {
-                Err("disk full".into())
-            } else {
-                Ok(())
-            }
-        });
-        assert_eq!(out.base_seqs.len(), 1); // only ok.md hydrated
-        assert_eq!(out.errors.len(), 1);
-        assert_eq!(out.errors[0].0, "bad.md");
     }
 
     #[test]
