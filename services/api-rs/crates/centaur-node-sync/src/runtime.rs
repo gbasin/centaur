@@ -38,6 +38,11 @@ pub trait AtriumClient {
     fn post_delete(&mut self, path: &str, base_seq: u64) -> Result<u64, String>;
     /// Fetch the bytes of a remote version (for an inbound adopt).
     fn fetch_bytes(&mut self, path: &str, seq: u64) -> Result<Vec<u8>, String>;
+    /// Fetch the session's artifact hydration scope. Default: no hydrated
+    /// artifacts, so small test fakes and legacy mocks keep compiling.
+    fn hydration_scope(&self) -> Result<Vec<crate::cas::CasHydrateEntry>, String> {
+        Ok(vec![])
+    }
     /// PUT the harness CLI's own transcript snapshot. This is internal harness
     /// state, not an artifact, so it bypasses the artifact ledger.
     fn put_harness_transcript(&mut self, _harness: &str, _bytes: &[u8]) -> Result<(), String> {
