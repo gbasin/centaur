@@ -40,6 +40,7 @@ pub struct OverlayMountPlan {
     pub merged: PathBuf,
     pub work: PathBuf,
     pub lower: LowerSource,
+    pub extra_lower: Option<PathBuf>,
     pub repo_mounts: Vec<RepoMount>,
     pub repo_cache_root: PathBuf,
 }
@@ -50,7 +51,12 @@ impl OverlayMountPlan {
     }
 
     pub fn overlay_options(&self) -> String {
-        overlay_options(&self.lower.path, &self.upper, &self.work)
+        overlay_options_with_extra_lower(
+            self.extra_lower.as_deref(),
+            &self.lower.path,
+            &self.upper,
+            &self.work,
+        )
     }
 }
 
@@ -81,6 +87,7 @@ pub fn plan_overlay_mount(
         merged: merged.to_path_buf(),
         work: host_root.join("overlay-work").join(session),
         lower,
+        extra_lower: None,
         repo_mounts,
         repo_cache_root: PathBuf::from(DEFAULT_REPO_CACHE_ROOT),
     })
@@ -212,11 +219,23 @@ pub fn repo_target_subdir(mount: &RepoMount) -> Result<String, String> {
 }
 
 pub fn overlay_options(lower: &Path, upper: &Path, work: &Path) -> String {
+    overlay_options_with_extra_lower(None, lower, upper, work)
+}
+
+pub fn overlay_options_with_extra_lower(
+    extra_lower: Option<&Path>,
+    lower: &Path,
+    upper: &Path,
+    work: &Path,
+) -> String {
+    let lowerdir = match extra_lower {
+        Some(extra_lower) => format!("{}:{}", extra_lower.display(), lower.display()),
+        None => lower.display().to_string(),
+    };
     format!(
-        "lowerdir={},upperdir={},workdir={},metacopy=off",
-        lower.display(),
+        "lowerdir={lowerdir},upperdir={},workdir={},metacopy=off",
         upper.display(),
-        work.display()
+        work.display(),
     )
 }
 
@@ -756,6 +775,27 @@ mod tests {
         assert_eq!(
             overlay_options(Path::new("/lower"), Path::new("/upper"), Path::new("/work")),
             "lowerdir=/lower,upperdir=/upper,workdir=/work,metacopy=off"
+        );
+    }
+
+    #[test]
+    fn overlay_options_prepend_extra_lower_when_present() {
+        let mut plan = plan_overlay_mount(
+            Path::new("/var/lib/centaur/overlays"),
+            "sess-1",
+            Path::new("/run/centaur/merged/sess-1"),
+            "/repo/lower",
+            &[],
+            None,
+        )
+        .unwrap();
+        plan.extra_lower = Some(PathBuf::from(
+            "/var/lib/centaur/overlays/artifact-lower/sess-1",
+        ));
+
+        assert_eq!(
+            plan.overlay_options(),
+            "lowerdir=/var/lib/centaur/overlays/artifact-lower/sess-1:/repo/lower,upperdir=/var/lib/centaur/overlays/sess-1,workdir=/var/lib/centaur/overlay-work/sess-1,metacopy=off"
         );
     }
 

@@ -4,7 +4,8 @@
 //! `provision-overlay --session <id> [--manifest-only]
 //!   [--overlays-root /var/lib/centaur/overlays] [--merged-root /run/centaur/merged]
 //!   [--lower <dir>] [--harness <kind>] [--harness-thread-id <id>]
-//!   [--harness-home <path>] [--repo <path>] [--repos-json <json>] [--agent-uid <uid>]`
+//!   [--harness-home <path>] [--repo <path>] [--repos-json <json>] [--agent-uid <uid>]
+//!   [--hydrate-artifacts] [--atrium-url <url>] [--atrium-key <key>] [--cas-dir <dir>]`
 //!
 //! Default mode preserves the legacy privileged provisioner path: prepare the
 //! host-backed upper, create the fixture lower when no repo is provided, mount
@@ -19,8 +20,10 @@
 //! - Without `--repo`, `--lower <dir>` is the fixture lower override.
 //! - Without either, the fixture lower is `<host-root>/overlay-lower/<session>`.
 
+use centaur_node_sync::cas::hydrate_artifact_lower;
+use centaur_node_sync::http_client::HttpAtriumClient;
 use centaur_node_sync::overlay_mount::{
-    DEFAULT_AGENT_UID, LowerKind, mount_overlay, plan_overlay_mount,
+    DEFAULT_AGENT_UID, LowerKind, OverlayMountPlan, mount_overlay, plan_overlay_mount,
 };
 use centaur_node_sync::session_manifest::{
     RepoMount, SessionManifest, normalize_harness, write_manifest,
@@ -41,6 +44,10 @@ struct Config {
     repo: String,
     repos: Vec<RepoMount>,
     agent_uid: Option<u32>,
+    hydrate_artifacts: bool,
+    atrium_url: Option<String>,
+    atrium_key: Option<String>,
+    cas_dir: PathBuf,
 }
 
 fn main() {
@@ -113,6 +120,7 @@ fn run() -> Result<(), String> {
         return Ok(());
     }
 
+    hydrate_artifacts_if_enabled(&cfg, &mut plan)?;
     let mounted = mount_overlay(plan, cfg.agent_uid)?;
     if mounted.lower.kind == LowerKind::Repo {
         write_manifest(
@@ -140,6 +148,37 @@ fn run() -> Result<(), String> {
     Ok(())
 }
 
+fn hydrate_artifacts_if_enabled(cfg: &Config, plan: &mut OverlayMountPlan) -> Result<(), String> {
+    if !cfg.hydrate_artifacts {
+        return Ok(());
+    }
+    let (Some(atrium_url), Some(atrium_key)) =
+        (cfg.atrium_url.as_deref(), cfg.atrium_key.as_deref())
+    else {
+        eprintln!("provision-overlay: hydrate: skipped (missing --atrium-url/--atrium-key)");
+        return Ok(());
+    };
+
+    let artifact_lower = cfg.overlays_root.join("artifact-lower").join(&cfg.session);
+    if artifact_lower.exists() {
+        std::fs::remove_dir_all(&artifact_lower)
+            .map_err(|e| format!("reset artifact lower {}: {e}", artifact_lower.display()))?;
+    }
+    std::fs::create_dir_all(&artifact_lower)
+        .map_err(|e| format!("create artifact lower {}: {e}", artifact_lower.display()))?;
+
+    let mut client = HttpAtriumClient::new(atrium_url, atrium_key, &cfg.session);
+    let outcome = hydrate_artifact_lower(&mut client, &cfg.cas_dir, &artifact_lower)?;
+    println!(
+        "provision-overlay: hydrate: {} reflinked, {} fetched, {} errors",
+        outcome.reflinked,
+        outcome.fetched,
+        outcome.errors.len()
+    );
+    plan.extra_lower = Some(artifact_lower);
+    Ok(())
+}
+
 fn parse_args<I>(args: I) -> Result<Config, String>
 where
     I: IntoIterator<Item = OsString>,
@@ -155,6 +194,20 @@ where
     let mut repo = String::new();
     let mut repos = Vec::new();
     let mut agent_uid = None;
+    let mut hydrate_artifacts =
+        env_bool_any(&["PROVISION_OVERLAY_HYDRATE_ARTIFACTS", "HYDRATE_ARTIFACTS"])?
+            .unwrap_or(false);
+    let mut atrium_url = env_non_empty_any(&[
+        "PROVISION_OVERLAY_ATRIUM_URL",
+        "ATRIUM_URL",
+        "ATRIUM_BASE_URL",
+    ])?;
+    let mut atrium_key = env_non_empty_any(&[
+        "PROVISION_OVERLAY_ATRIUM_KEY",
+        "ATRIUM_KEY",
+        "ATRIUM_CAPTURE_API_KEY",
+    ])?;
+    let mut cas_dir = env_path_any(&["PROVISION_OVERLAY_CAS_DIR", "CAS_DIR"])?;
 
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
@@ -201,6 +254,18 @@ where
                     format!("--agent-uid requires an unsigned integer, got {value:?}")
                 })?);
             }
+            "--hydrate-artifacts" => {
+                hydrate_artifacts = true;
+            }
+            "--atrium-url" => {
+                atrium_url = non_empty_value(next_value(&mut iter, "--atrium-url")?);
+            }
+            "--atrium-key" => {
+                atrium_key = non_empty_value(next_value(&mut iter, "--atrium-key")?);
+            }
+            "--cas-dir" => {
+                cas_dir = Some(PathBuf::from(next_value(&mut iter, "--cas-dir")?));
+            }
             "--help" | "-h" => {
                 print_help();
                 std::process::exit(0);
@@ -208,6 +273,8 @@ where
             _ => return Err(format!("unknown argument {arg:?}")),
         }
     }
+
+    let cas_dir = cas_dir.unwrap_or_else(|| overlays_root.join("cas"));
 
     Ok(Config {
         session: session.ok_or_else(|| "--session <ID> is required".to_string())?,
@@ -221,6 +288,10 @@ where
         repo,
         repos,
         agent_uid,
+        hydrate_artifacts,
+        atrium_url,
+        atrium_key,
+        cas_dir,
     })
 }
 
@@ -231,9 +302,62 @@ fn next_value(iter: &mut impl Iterator<Item = OsString>, flag: &str) -> Result<S
         .map_err(|_| format!("{flag} value must be valid UTF-8"))
 }
 
+fn non_empty_value(value: String) -> Option<String> {
+    (!value.trim().is_empty()).then_some(value)
+}
+
+fn env_non_empty_any(names: &[&str]) -> Result<Option<String>, String> {
+    for name in names {
+        match std::env::var(name) {
+            Ok(value) => {
+                if !value.trim().is_empty() {
+                    return Ok(Some(value));
+                }
+            }
+            Err(std::env::VarError::NotPresent) => {}
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err(format!("{name} must be valid UTF-8"));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn env_path_any(names: &[&str]) -> Result<Option<PathBuf>, String> {
+    Ok(env_non_empty_any(names)?.map(PathBuf::from))
+}
+
+fn env_bool_any(names: &[&str]) -> Result<Option<bool>, String> {
+    for name in names {
+        match std::env::var(name) {
+            Ok(value) => {
+                if value.trim().is_empty() {
+                    continue;
+                }
+                return parse_bool(name, &value).map(Some);
+            }
+            Err(std::env::VarError::NotPresent) => {}
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err(format!("{name} must be valid UTF-8"));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn parse_bool(name: &str, value: &str) -> Result<bool, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => Err(format!(
+            "{name} must be a boolean (true/false/1/0/yes/no/on/off), got {value:?}"
+        )),
+    }
+}
+
 fn print_help() {
     println!(
-        "usage: provision-overlay --session <ID> [--manifest-only] [--overlays-root PATH] [--merged-root PATH] [--lower PATH] [--harness claude|codex|null] [--harness-thread-id ID] [--harness-home PATH] [--repo PATH] [--repos-json JSON] [--agent-uid UID]"
+        "usage: provision-overlay --session <ID> [--manifest-only] [--overlays-root PATH] [--merged-root PATH] [--lower PATH] [--harness claude|codex|null] [--harness-thread-id ID] [--harness-home PATH] [--repo PATH] [--repos-json JSON] [--agent-uid UID] [--hydrate-artifacts] [--atrium-url URL] [--atrium-key KEY] [--cas-dir PATH]"
     );
 }
 
@@ -274,6 +398,27 @@ mod tests {
         assert!(cfg.manifest_only);
         assert_eq!(cfg.session, "sess-1");
         assert_eq!(cfg.agent_uid, Some(4242));
+    }
+
+    #[test]
+    fn parse_hydration_flags() {
+        let cfg = parse_args([
+            OsString::from("--session"),
+            OsString::from("sess-1"),
+            OsString::from("--hydrate-artifacts"),
+            OsString::from("--atrium-url"),
+            OsString::from("http://atrium"),
+            OsString::from("--atrium-key"),
+            OsString::from("key"),
+            OsString::from("--cas-dir"),
+            OsString::from("/cache/cas"),
+        ])
+        .unwrap();
+
+        assert!(cfg.hydrate_artifacts);
+        assert_eq!(cfg.atrium_url.as_deref(), Some("http://atrium"));
+        assert_eq!(cfg.atrium_key.as_deref(), Some("key"));
+        assert_eq!(cfg.cas_dir, PathBuf::from("/cache/cas"));
     }
 
     #[test]

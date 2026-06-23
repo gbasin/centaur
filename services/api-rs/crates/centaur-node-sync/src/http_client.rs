@@ -4,7 +4,9 @@
 //! synchronous per session.
 
 use crate::adopt::RemoteChange;
+use crate::cas::CasHydrateEntry;
 use crate::runtime::{AtriumClient, status_of};
+use serde::Deserialize;
 
 pub struct HttpAtriumClient {
     base_url: String,
@@ -47,6 +49,46 @@ fn enc(s: &str) -> String {
             _ => format!("%{b:02X}"),
         })
         .collect()
+}
+
+#[derive(Debug, Deserialize)]
+struct HydrationScopeResponse {
+    #[serde(default)]
+    paths: Vec<HydrationScopePath>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HydrationScopePath {
+    path: String,
+    #[serde(rename = "latestSeq")]
+    latest_seq: u64,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    sha: Option<String>,
+}
+
+fn parse_hydration_scope(value: serde_json::Value) -> Result<Vec<CasHydrateEntry>, String> {
+    let response = serde_json::from_value::<HydrationScopeResponse>(value)
+        .map_err(|e| format!("parse hydration-scope response: {e}"))?;
+    Ok(response
+        .paths
+        .into_iter()
+        .filter_map(|path| {
+            if path.kind.as_deref() == Some("deleted") {
+                return None;
+            }
+            let sha = path.sha?.trim().to_string();
+            if sha.is_empty() {
+                return None;
+            }
+            Some(CasHydrateEntry {
+                path: path.path,
+                seq: path.latest_seq,
+                sha,
+            })
+        })
+        .collect())
 }
 
 impl AtriumClient for HttpAtriumClient {
@@ -125,6 +167,17 @@ impl AtriumClient for HttpAtriumClient {
         let mut buf = Vec::new();
         std::io::copy(&mut resp.into_reader(), &mut buf).map_err(|e| e.to_string())?;
         Ok(buf)
+    }
+
+    fn hydration_scope(&self) -> Result<Vec<CasHydrateEntry>, String> {
+        let resp = self
+            .agent
+            .get(&self.url("/hydration-scope"))
+            .set("x-api-key", &self.api_key)
+            .call()
+            .map_err(|e| format!("hydration-scope: {e}"))?;
+        let value: serde_json::Value = resp.into_json().map_err(|e| e.to_string())?;
+        parse_hydration_scope(value)
     }
 
     fn put_harness_transcript(&mut self, harness: &str, bytes: &[u8]) -> Result<(), String> {
@@ -239,6 +292,38 @@ mod tests {
         assert_eq!(
             client.url("/harness-transcript?harness=claude"),
             "http://atrium/api/internal/sessions/slack:C123:123.456/harness-transcript?harness=claude"
+        );
+    }
+
+    #[test]
+    fn hydration_scope_parse_skips_deleted_and_missing_sha() {
+        let entries = parse_hydration_scope(serde_json::json!({
+            "sessionId": "sess-1",
+            "scope": "test",
+            "paths": [
+                {"path": "shared/a.txt", "latestSeq": 4, "kind": "file", "sha": "aa11"},
+                {"path": "scratch/sess-1/b.txt", "latestSeq": 5, "kind": "file", "sha": "bb22"},
+                {"path": "shared/deleted.txt", "latestSeq": 6, "kind": "deleted", "sha": "cc33"},
+                {"path": "shared/null.txt", "latestSeq": 7, "kind": "file", "sha": null},
+                {"path": "shared/empty.txt", "latestSeq": 8, "kind": "file", "sha": ""}
+            ]
+        }))
+        .unwrap();
+
+        assert_eq!(
+            entries,
+            vec![
+                CasHydrateEntry {
+                    path: "shared/a.txt".to_string(),
+                    seq: 4,
+                    sha: "aa11".to_string(),
+                },
+                CasHydrateEntry {
+                    path: "scratch/sess-1/b.txt".to_string(),
+                    seq: 5,
+                    sha: "bb22".to_string(),
+                },
+            ]
         );
     }
 }

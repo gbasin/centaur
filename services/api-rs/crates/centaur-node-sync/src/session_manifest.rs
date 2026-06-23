@@ -127,7 +127,7 @@ pub fn discover_sessions(overlays_root: &Path) -> Result<SessionDiscovery, Strin
             ));
             continue;
         };
-        if name.starts_with('.') {
+        if name.starts_with('.') || name == "artifact-lower" {
             continue;
         }
         let file_type = match entry.file_type() {
@@ -304,6 +304,7 @@ mod tests {
         std::fs::create_dir_all(root.join("active")).unwrap();
         std::fs::create_dir_all(root.join("missing-manifest")).unwrap();
         std::fs::create_dir_all(root.join("bad-manifest")).unwrap();
+        std::fs::create_dir_all(root.join("artifact-lower/active")).unwrap();
         std::fs::create_dir_all(root.join(".dot-session")).unwrap();
         std::fs::write(root.join("plain-file"), b"not a dir").unwrap();
 
@@ -349,6 +350,12 @@ mod tests {
                 .warnings
                 .iter()
                 .all(|warning| !warning.contains(".dot-session"))
+        );
+        assert!(
+            discovery
+                .warnings
+                .iter()
+                .all(|warning| !warning.contains("artifact-lower"))
         );
     }
 

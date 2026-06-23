@@ -13,8 +13,10 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+use crate::runtime::AtriumClient;
+
 /// One hydration entry resolved to its content hash.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct CasHydrateEntry {
     pub path: String,
     pub seq: u64,
@@ -156,9 +158,64 @@ pub fn materialize_cached(
     out
 }
 
+pub fn hydrate_artifact_lower(
+    client: &mut dyn AtriumClient,
+    cas_dir: &Path,
+    artifact_lower_root: &Path,
+) -> Result<MaterializeOutcome, String> {
+    let entries = client.hydration_scope()?;
+    Ok(materialize_cached(
+        &entries,
+        cas_dir,
+        artifact_lower_root,
+        |path, seq| client.fetch_bytes(path, seq),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
+    #[derive(Default)]
+    struct FakeAtriumClient {
+        entries: Vec<CasHydrateEntry>,
+        bytes: HashMap<(String, u64), Vec<u8>>,
+    }
+
+    impl AtriumClient for FakeAtriumClient {
+        fn post_capture(
+            &mut self,
+            _path: &str,
+            _base_seq: u64,
+            _bytes: &[u8],
+        ) -> Result<u64, String> {
+            unreachable!("hydrate tests do not capture artifacts")
+        }
+
+        fn post_delete(&mut self, _path: &str, _base_seq: u64) -> Result<u64, String> {
+            unreachable!("hydrate tests do not delete artifacts")
+        }
+
+        fn fetch_bytes(&mut self, path: &str, seq: u64) -> Result<Vec<u8>, String> {
+            self.bytes
+                .get(&(path.to_string(), seq))
+                .cloned()
+                .ok_or_else(|| format!("missing bytes for {path}@{seq}"))
+        }
+
+        fn hydration_scope(&self) -> Result<Vec<CasHydrateEntry>, String> {
+            Ok(self.entries.clone())
+        }
+
+        fn atrium_changes(&self, since: &str) -> Result<(Vec<String>, String), String> {
+            Ok((vec![], since.to_string()))
+        }
+
+        fn atrium_doc(&self, target_id: &str, doc: &str) -> Result<Vec<u8>, String> {
+            Ok(format!("{target_id}/{doc}").into_bytes())
+        }
+    }
 
     fn tmp(tag: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!("cas-it-{tag}-{}", std::process::id()));
@@ -216,6 +273,50 @@ mod tests {
         assert_eq!(
             fs::read(lower.join("shared/copy.md")).unwrap(),
             fs::read(lower.join("proj-x/a.md")).unwrap(),
+        );
+        assert!(out.errors.is_empty());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn hydrate_artifact_lower_fetches_scope_and_materializes_files() {
+        let root = tmp("hydrate");
+        let cas = root.join("cas");
+        let lower = root.join("lower");
+        fs::create_dir_all(&cas).unwrap();
+
+        let entries = vec![
+            CasHydrateEntry {
+                path: "shared/a.txt".to_string(),
+                seq: 11,
+                sha: "aa11".to_string(),
+            },
+            CasHydrateEntry {
+                path: "scratch/sess-1/b.txt".to_string(),
+                seq: 12,
+                sha: "bb22".to_string(),
+            },
+        ];
+        let mut bytes = HashMap::new();
+        bytes.insert(("shared/a.txt".to_string(), 11), b"shared bytes".to_vec());
+        bytes.insert(
+            ("scratch/sess-1/b.txt".to_string(), 12),
+            b"scratch bytes".to_vec(),
+        );
+        let mut client = FakeAtriumClient { entries, bytes };
+
+        let out = hydrate_artifact_lower(&mut client, &cas, &lower).unwrap();
+
+        assert_eq!(out.fetched, 2);
+        assert_eq!(out.base_seqs.get("shared/a.txt"), Some(&11));
+        assert_eq!(out.base_seqs.get("scratch/sess-1/b.txt"), Some(&12));
+        assert_eq!(
+            fs::read(lower.join("shared/a.txt")).unwrap(),
+            b"shared bytes"
+        );
+        assert_eq!(
+            fs::read(lower.join("scratch/sess-1/b.txt")).unwrap(),
+            b"scratch bytes"
         );
         assert!(out.errors.is_empty());
         let _ = fs::remove_dir_all(&root);
