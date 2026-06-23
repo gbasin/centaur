@@ -161,6 +161,12 @@ spec:
           ports:
             - name: http
               containerPort: 5678
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 5678
+            initialDelaySeconds: 1
+            periodSeconds: 1
           volumeMounts:
             - name: mock
               mountPath: /mock
@@ -701,6 +707,13 @@ spec:
       workingDir: /workspace
 YAML
 kubectl -n "${NS}" wait --for=condition=Ready "pod/${HYDRATE_POD}" --timeout=180s
+MOCK_URL="http://${CAPTURE_SINK}.${NS}.svc.cluster.local:5678"
+echo "--- DIAG: in-cluster mock /hydration-scope body (what the daemon's client sees) ---"
+kubectl -n "${NS}" run mockprobe --rm -i --restart=Never --image=curlimages/curl:8.9.1 --command -- \
+  curl -s "${MOCK_URL}/api/internal/sessions/${HYDRATE_SESSION}/hydration-scope" 2>&1 || true
+echo
+echo "--- DIAG: mock-atrium request log (the paths the daemon actually requested) ---"
+kubectl -n "${NS}" logs "deploy/${CAPTURE_SINK}" --tail=80 2>&1 || true
 wait_for_log "session ${HYDRATE_SESSION}: hydrate: [1-9]" "artifact hydration"
 kubectl -n "${NS}" exec "${HYDRATE_POD}" -c agent -- /bin/sh -ceu '
   test "$(cat /workspace/shared/hydrated.md)" = "hydrated by atrium"

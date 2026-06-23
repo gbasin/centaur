@@ -367,12 +367,18 @@ mod linux_daemon {
                                 continue;
                             }
                         };
-                        hydrate_artifacts_if_enabled(
-                            &global,
-                            &overlays_root,
-                            &discovered.session,
-                            &mut plan,
-                        );
+                        // Hydrate the artifact lower only on FIRST mount. Re-hydrating
+                        // every scan would `remove_dir_all` the artifact-lower out from
+                        // under the live overlay (it is an active lowerdir), emptying the
+                        // agent's view. The mount is idempotent; the hydration must not be.
+                        if !mounted_overlays.contains_key(&discovered.session) {
+                            hydrate_artifacts_if_enabled(
+                                &global,
+                                &overlays_root,
+                                &discovered.session,
+                                &mut plan,
+                            );
+                        }
                         let mounted = match mount_overlay(plan, Some(discovered.manifest.agent_uid))
                         {
                             Ok(plan) => plan,
