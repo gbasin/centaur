@@ -364,6 +364,19 @@ cat > "$HOME_DIR/.pi/agent/settings.json" <<EOF
 }
 EOF
 
+# 5B-1: When node-sync is enabled, /workspace is a daemon-provisioned
+# merged overlay whose lower checkout is already at the base ref. Keep this
+# default-OFF so the legacy git clone/bootstrap path remains unchanged.
+if [ "${CENTAUR_OVERLAY_ENABLED:-0}" = "1" ] \
+    || [ "${CENTAUR_OVERLAY_ENABLED:-0}" = "true" ] \
+    || [ "${CENTAUR_OVERLAY_ENABLED:-0}" = "True" ] \
+    || [ "${CENTAUR_OVERLAY_ENABLED:-0}" = "TRUE" ]; then
+    WORKSPACE_DIR="/workspace"
+    if [ -n "${CENTAUR_REPO_BASE_REF:-}" ]; then
+        git -C "$WORKSPACE_DIR" switch "$CENTAUR_REPO_BASE_REF" >/dev/null 2>&1 \
+            || echo "warning: failed to switch overlay workspace to $CENTAUR_REPO_BASE_REF" >&2
+    fi
+else
 # ── Per-session workspace clone (no shared worktree metadata) ────────────────
 if [ "${CENTAUR_PERSISTENT_STATE:-0}" = "1" ]; then
     WORKSPACE_DIR="$STATE_DIR/workspace"
@@ -390,6 +403,7 @@ if [ -n "${AGENT_REPO:-}" ]; then
     fi
 else
     mkdir -p "$WORKSPACE_DIR"
+fi
 fi
 
 # ── Ensure uploads directory exists ──────────────────────────────────────────
