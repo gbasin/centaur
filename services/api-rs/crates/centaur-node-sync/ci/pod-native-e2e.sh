@@ -714,10 +714,26 @@ kubectl -n "${NS}" run mockprobe --rm -i --restart=Never --image=curlimages/curl
 echo
 echo "--- DIAG: mock-atrium request log (the paths the daemon actually requested) ---"
 kubectl -n "${NS}" logs "deploy/${CAPTURE_SINK}" --tail=80 2>&1 || true
-wait_for_log "session ${HYDRATE_SESSION}: hydrate: [1-9]" "artifact hydration"
-kubectl -n "${NS}" exec "${HYDRATE_POD}" -c agent -- /bin/sh -ceu '
-  test "$(cat /workspace/shared/hydrated.md)" = "hydrated by atrium"
-'
+# Assert the agent SEES the hydrated artifact directly. (We don't grep the daemon's
+# one-shot "hydrate: N" log line: the per-second capture/changes poll flood truncates it
+# out of the log tail before we could match it. The mounted overlay is the real proof.)
+# Hydration runs before the overlay mount, which gates the pod's readiness, so the file is
+# already present; retry briefly only for safety.
+hydrate_ok=0
+for _ in $(seq 1 30); do
+  if kubectl -n "${NS}" exec "${HYDRATE_POD}" -c agent -- /bin/sh -ceu \
+       'test "$(cat /workspace/shared/hydrated.md 2>/dev/null)" = "hydrated by atrium"'; then
+    hydrate_ok=1
+    echo "OK: agent sees the hydrated artifact at /workspace/shared/hydrated.md"
+    break
+  fi
+  sleep 2
+done
+if [[ "${hydrate_ok}" != "1" ]]; then
+  echo "FAIL: /workspace/shared/hydrated.md not present or wrong content" >&2
+  kubectl -n "${NS}" exec "${HYDRATE_POD}" -c agent -- /bin/sh -ceu 'ls -la /workspace/shared 2>&1 || true' >&2 || true
+  exit 1
+fi
 
 echo "==> [9/9] assert inbound adopt (remote edit -> merged) via pod logs"
 if [[ "${NODE_SYNC_E2E_INBOUND:-0}" == "1" ]]; then
