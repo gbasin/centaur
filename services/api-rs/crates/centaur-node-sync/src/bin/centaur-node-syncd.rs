@@ -81,6 +81,7 @@ mod linux_daemon {
     use super::{SessionConfig, repo_name, session_config_from_discovered};
     use centaur_node_sync::backpressure;
     use centaur_node_sync::backpressure::Budget;
+    use centaur_node_sync::cas::hydrate_artifact_lower_into_plan;
     use centaur_node_sync::echo::EchoGuard;
     use centaur_node_sync::fs_linux;
     use centaur_node_sync::http_client::HttpAtriumClient;
@@ -109,6 +110,8 @@ mod linux_daemon {
         base_url: String,
         api_key: String,
         atrium_root: PathBuf,
+        hydrate_artifacts: bool,
+        cas_dir: PathBuf,
         budget: Budget,
         large_threshold: u64,
     }
@@ -139,6 +142,10 @@ mod linux_daemon {
         };
 
         let env = |k: &str| std::env::var(k).unwrap_or_default();
+        let overlays_root_for_defaults = args
+            .overlays_root
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("/var/lib/centaur/overlays"));
         let interval_secs = args
             .interval_secs
             .unwrap_or_else(|| env("NODE_SYNC_INTERVAL_SECS").parse::<u64>().unwrap_or(2));
@@ -146,6 +153,11 @@ mod linux_daemon {
             base_url: env("ATRIUM_BASE_URL"),
             api_key: env("ATRIUM_CAPTURE_API_KEY"),
             atrium_root: non_empty_path(&env("NODE_SYNC_ATRIUM_ROOT"), "/atrium"),
+            hydrate_artifacts: env_truthy(&env("NODE_SYNC_HYDRATE_ARTIFACTS")),
+            cas_dir: non_empty_pathbuf(
+                &env("NODE_SYNC_CAS_DIR"),
+                overlays_root_for_defaults.join("cas"),
+            ),
             budget: Budget {
                 max_dirty_bytes: env("NODE_SYNC_DIRTY_BUDGET")
                     .parse::<u64>()
@@ -233,6 +245,18 @@ mod linux_daemon {
         } else {
             PathBuf::from(value)
         }
+    }
+
+    fn non_empty_pathbuf(value: &str, default: PathBuf) -> PathBuf {
+        if value.is_empty() {
+            default
+        } else {
+            PathBuf::from(value)
+        }
+    }
+
+    fn env_truthy(value: &str) -> bool {
+        matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true")
     }
 
     fn single_session_config(global: &GlobalConfig) -> Result<SessionConfig, Vec<String>> {
@@ -329,7 +353,7 @@ mod linux_daemon {
                     echoes.retain(|session, _| active.contains(session));
 
                     for discovered in discovery.sessions {
-                        let plan = match plan_overlay_mount(
+                        let mut plan = match plan_overlay_mount(
                             &overlays_root,
                             &discovered.session,
                             &discovered.manifest.merged,
@@ -343,6 +367,18 @@ mod linux_daemon {
                                 continue;
                             }
                         };
+                        // Hydrate the artifact lower only on FIRST mount. Re-hydrating
+                        // every scan would `remove_dir_all` the artifact-lower out from
+                        // under the live overlay (it is an active lowerdir), emptying the
+                        // agent's view. The mount is idempotent; the hydration must not be.
+                        if !mounted_overlays.contains_key(&discovered.session) {
+                            hydrate_artifacts_if_enabled(
+                                &global,
+                                &overlays_root,
+                                &discovered.session,
+                                &mut plan,
+                            );
+                        }
                         let mounted = match mount_overlay(plan, Some(discovered.manifest.agent_uid))
                         {
                             Ok(plan) => plan,
@@ -377,6 +413,38 @@ mod linux_daemon {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_secs(interval_secs));
+        }
+    }
+
+    fn hydrate_artifacts_if_enabled(
+        global: &GlobalConfig,
+        overlays_root: &Path,
+        session: &str,
+        plan: &mut OverlayMountPlan,
+    ) {
+        if !global.hydrate_artifacts || global.base_url.is_empty() || global.api_key.is_empty() {
+            return;
+        }
+
+        let mut client = HttpAtriumClient::new(&global.base_url, &global.api_key, session);
+        match hydrate_artifact_lower_into_plan(
+            &mut client,
+            &global.cas_dir,
+            overlays_root,
+            session,
+            plan,
+        ) {
+            Ok(outcome) => {
+                println!(
+                    "session {session}: hydrate: {} reflinked, {} fetched, {} errors",
+                    outcome.reflinked,
+                    outcome.fetched,
+                    outcome.errors.len()
+                );
+            }
+            Err(e) => {
+                eprintln!("session {session}: hydrate error: {e}");
+            }
         }
     }
 

@@ -20,7 +20,7 @@
 //! - Without `--repo`, `--lower <dir>` is the fixture lower override.
 //! - Without either, the fixture lower is `<host-root>/overlay-lower/<session>`.
 
-use centaur_node_sync::cas::hydrate_artifact_lower;
+use centaur_node_sync::cas::hydrate_artifact_lower_into_plan;
 use centaur_node_sync::http_client::HttpAtriumClient;
 use centaur_node_sync::overlay_mount::{
     DEFAULT_AGENT_UID, LowerKind, OverlayMountPlan, mount_overlay, plan_overlay_mount,
@@ -159,23 +159,20 @@ fn hydrate_artifacts_if_enabled(cfg: &Config, plan: &mut OverlayMountPlan) -> Re
         return Ok(());
     };
 
-    let artifact_lower = cfg.overlays_root.join("artifact-lower").join(&cfg.session);
-    if artifact_lower.exists() {
-        std::fs::remove_dir_all(&artifact_lower)
-            .map_err(|e| format!("reset artifact lower {}: {e}", artifact_lower.display()))?;
-    }
-    std::fs::create_dir_all(&artifact_lower)
-        .map_err(|e| format!("create artifact lower {}: {e}", artifact_lower.display()))?;
-
     let mut client = HttpAtriumClient::new(atrium_url, atrium_key, &cfg.session);
-    let outcome = hydrate_artifact_lower(&mut client, &cfg.cas_dir, &artifact_lower)?;
+    let outcome = hydrate_artifact_lower_into_plan(
+        &mut client,
+        &cfg.cas_dir,
+        &cfg.overlays_root,
+        &cfg.session,
+        plan,
+    )?;
     println!(
         "provision-overlay: hydrate: {} reflinked, {} fetched, {} errors",
         outcome.reflinked,
         outcome.fetched,
         outcome.errors.len()
     );
-    plan.extra_lower = Some(artifact_lower);
     Ok(())
 }
 

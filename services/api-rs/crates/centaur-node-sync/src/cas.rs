@@ -13,6 +13,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+use crate::overlay_mount::OverlayMountPlan;
 use crate::runtime::AtriumClient;
 
 /// One hydration entry resolved to its content hash.
@@ -172,10 +173,32 @@ pub fn hydrate_artifact_lower(
     ))
 }
 
+pub fn hydrate_artifact_lower_into_plan(
+    client: &mut dyn AtriumClient,
+    cas_dir: &Path,
+    overlays_root: &Path,
+    session: &str,
+    plan: &mut OverlayMountPlan,
+) -> Result<MaterializeOutcome, String> {
+    let artifact_lower = overlays_root.join("artifact-lower").join(session);
+    if artifact_lower.exists() {
+        fs::remove_dir_all(&artifact_lower)
+            .map_err(|e| format!("reset artifact lower {}: {e}", artifact_lower.display()))?;
+    }
+    fs::create_dir_all(&artifact_lower)
+        .map_err(|e| format!("create artifact lower {}: {e}", artifact_lower.display()))?;
+
+    let outcome = hydrate_artifact_lower(client, cas_dir, &artifact_lower)?;
+    plan.extra_lower = Some(artifact_lower);
+    Ok(outcome)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::overlay_mount::{LowerKind, LowerSource, OverlayMountPlan};
     use std::collections::HashMap;
+    use std::path::PathBuf;
 
     #[derive(Default)]
     struct FakeAtriumClient {
@@ -319,6 +342,59 @@ mod tests {
             b"scratch bytes"
         );
         assert!(out.errors.is_empty());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn hydrate_artifact_lower_into_plan_resets_lower_and_sets_extra_lower() {
+        let root = tmp("plan");
+        let overlays_root = root.join("overlays");
+        let cas = overlays_root.join("cas");
+        let stale_lower = overlays_root.join("artifact-lower/sess-1");
+        fs::create_dir_all(&stale_lower).unwrap();
+        fs::write(stale_lower.join("stale.txt"), b"old").unwrap();
+
+        let mut bytes = HashMap::new();
+        bytes.insert(("shared/hydrated.md".to_string(), 1), b"fresh".to_vec());
+        let mut client = FakeAtriumClient {
+            entries: vec![CasHydrateEntry {
+                path: "shared/hydrated.md".to_string(),
+                seq: 1,
+                sha: "cc33".to_string(),
+            }],
+            bytes,
+        };
+        let mut plan = OverlayMountPlan {
+            session: "sess-1".to_string(),
+            upper: overlays_root.join("sess-1"),
+            merged: root.join("merged/sess-1"),
+            work: root.join("work/sess-1"),
+            lower: LowerSource {
+                path: root.join("lower/sess-1"),
+                kind: LowerKind::Fixture,
+            },
+            extra_lower: None,
+            repo_mounts: Vec::new(),
+            repo_cache_root: PathBuf::from("/cache"),
+        };
+
+        let out = hydrate_artifact_lower_into_plan(
+            &mut client,
+            &cas,
+            &overlays_root,
+            "sess-1",
+            &mut plan,
+        )
+        .unwrap();
+
+        let artifact_lower = overlays_root.join("artifact-lower/sess-1");
+        assert_eq!(out.fetched, 1);
+        assert_eq!(plan.extra_lower, Some(artifact_lower.clone()));
+        assert!(!artifact_lower.join("stale.txt").exists());
+        assert_eq!(
+            fs::read(artifact_lower.join("shared/hydrated.md")).unwrap(),
+            b"fresh"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 

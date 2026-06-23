@@ -127,7 +127,7 @@ pub fn discover_sessions(overlays_root: &Path) -> Result<SessionDiscovery, Strin
             ));
             continue;
         };
-        if name.starts_with('.') || name == "artifact-lower" {
+        if name.starts_with('.') || name == "artifact-lower" || name == "cas" {
             continue;
         }
         let file_type = match entry.file_type() {
