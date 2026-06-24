@@ -112,6 +112,9 @@ pub(crate) fn overlay_manifest_init_container_json(
         "--agent-uid".to_owned(),
         metadata.agent_uid.to_string(),
     ];
+    if overlay.flat_home {
+        args.push("--flat-home".to_owned());
+    }
     push_optional_arg(&mut args, "--harness", metadata.harness.as_deref());
     push_optional_arg(
         &mut args,
@@ -334,5 +337,25 @@ mod tests {
                 "readOnly": true,
             })
         );
+    }
+
+    #[test]
+    fn manifest_init_args_include_flat_home_iff_enabled() {
+        for flat_home in [false, true] {
+            let mut overlay = OverlayConfig::new("centaur-node-sync:test");
+            overlay.flat_home = flat_home;
+            let metadata = OverlayMetadata {
+                agent_uid: 4242,
+                ..OverlayMetadata::default()
+            };
+
+            let init = overlay_manifest_init_container_json(&overlay, "asbx-test", &metadata);
+            let args = init["args"].as_array().unwrap();
+            assert_eq!(
+                args.iter().any(|arg| arg.as_str() == Some("--flat-home")),
+                flat_home,
+                "flat_home={flat_home}"
+            );
+        }
     }
 }

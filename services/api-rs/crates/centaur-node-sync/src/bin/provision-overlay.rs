@@ -4,7 +4,7 @@
 //! `provision-overlay --session <id> [--manifest-only]
 //!   [--overlays-root /var/lib/centaur/overlays] [--merged-root /run/centaur/merged]
 //!   [--lower <dir>] [--harness <kind>] [--harness-thread-id <id>]
-//!   [--harness-home <path>] [--repo <path>] [--repos-json <json>] [--agent-uid <uid>]
+//!   [--harness-home <path>] [--flat-home] [--repo <path>] [--repos-json <json>] [--agent-uid <uid>]
 //!   [--hydrate-artifacts] [--atrium-url <url>] [--atrium-key <key>] [--cas-dir <dir>]`
 //!
 //! Default mode preserves the legacy privileged provisioner path: prepare the
@@ -41,6 +41,7 @@ struct Config {
     harness: Option<String>,
     harness_thread_id: String,
     harness_home: String,
+    flat_home: bool,
     repo: String,
     repos: Vec<RepoMount>,
     agent_uid: Option<u32>,
@@ -104,6 +105,7 @@ fn run() -> Result<(), String> {
             harness: cfg.harness.clone(),
             harness_thread_id: cfg.harness_thread_id.clone(),
             harness_home: cfg.harness_home.clone(),
+            flat_home: cfg.flat_home,
             repo: manifest_repo,
             repos: cfg.repos.clone(),
             agent_uid: cfg.agent_uid.unwrap_or(DEFAULT_AGENT_UID),
@@ -131,6 +133,7 @@ fn run() -> Result<(), String> {
                 harness: cfg.harness.clone(),
                 harness_thread_id: cfg.harness_thread_id.clone(),
                 harness_home: cfg.harness_home.clone(),
+                flat_home: cfg.flat_home,
                 repo: mounted.lower.path.to_string_lossy().into_owned(),
                 repos: cfg.repos.clone(),
                 agent_uid: cfg.agent_uid.unwrap_or(DEFAULT_AGENT_UID),
@@ -188,6 +191,7 @@ where
     let mut harness = None;
     let mut harness_thread_id = String::new();
     let mut harness_home = String::new();
+    let mut flat_home = false;
     let mut repo = String::new();
     let mut repos = Vec::new();
     let mut agent_uid = None;
@@ -237,6 +241,9 @@ where
             "--harness-home" => {
                 harness_home = next_value(&mut iter, "--harness-home")?;
             }
+            "--flat-home" => {
+                flat_home = true;
+            }
             "--repo" => {
                 repo = next_value(&mut iter, "--repo")?;
             }
@@ -282,6 +289,7 @@ where
         harness,
         harness_thread_id,
         harness_home,
+        flat_home,
         repo,
         repos,
         agent_uid,
@@ -354,7 +362,7 @@ fn parse_bool(name: &str, value: &str) -> Result<bool, String> {
 
 fn print_help() {
     println!(
-        "usage: provision-overlay --session <ID> [--manifest-only] [--overlays-root PATH] [--merged-root PATH] [--lower PATH] [--harness claude|codex|null] [--harness-thread-id ID] [--harness-home PATH] [--repo PATH] [--repos-json JSON] [--agent-uid UID] [--hydrate-artifacts] [--atrium-url URL] [--atrium-key KEY] [--cas-dir PATH]"
+        "usage: provision-overlay --session <ID> [--manifest-only] [--overlays-root PATH] [--merged-root PATH] [--lower PATH] [--harness claude|codex|null] [--harness-thread-id ID] [--harness-home PATH] [--flat-home] [--repo PATH] [--repos-json JSON] [--agent-uid UID] [--hydrate-artifacts] [--atrium-url URL] [--atrium-key KEY] [--cas-dir PATH]"
     );
 }
 
@@ -395,6 +403,20 @@ mod tests {
         assert!(cfg.manifest_only);
         assert_eq!(cfg.session, "sess-1");
         assert_eq!(cfg.agent_uid, Some(4242));
+        assert!(!cfg.flat_home);
+    }
+
+    #[test]
+    fn parse_flat_home_flag() {
+        let cfg = parse_args([
+            OsString::from("--manifest-only"),
+            OsString::from("--session"),
+            OsString::from("sess-1"),
+            OsString::from("--flat-home"),
+        ])
+        .unwrap();
+
+        assert!(cfg.flat_home);
     }
 
     #[test]
