@@ -1,5 +1,10 @@
 # Spec: Sandbox artifact capture (Centaur producer half)
 
+> **SUPERSEDED 2026-06-24.** The in-pod Python poll (`artifact_capture.py`) described here was
+> **retired in the poll→daemon cutover (#23)**. Artifact capture is now the privileged node-sync
+> daemon scanning the overlay upper, with the flat-`~` agent FS the default. This doc is kept for
+> history; see `notes/flat-home-workspace-design.md` + `in-agent-poll-cutover-plan.md` (Atrium).
+
 You are implementing the **Centaur producer half** of an "artifact capture" feature.
 The **atrium consumer half is already built and merged** — it listens for an
 `artifact.captured` event and renders a gallery, fetching bytes from atrium's own
