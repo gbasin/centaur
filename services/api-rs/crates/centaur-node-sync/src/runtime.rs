@@ -438,13 +438,14 @@ pub fn locate_harness_transcript(
     harness: HarnessTranscriptKind,
     harness_home: &Path,
     thread_id: &str,
+    flat_home: bool,
 ) -> Option<PathBuf> {
     let thread_id = thread_id.trim();
     match harness {
         HarnessTranscriptKind::Claude if !thread_id.is_empty() => {
             let path = harness_home
                 .join("projects")
-                .join("-home-agent-workspace")
+                .join(claude_transcript_project_key(flat_home))
                 .join(format!("{thread_id}.jsonl"));
             entries
                 .iter()
@@ -458,9 +459,11 @@ pub fn locate_harness_transcript(
             .iter()
             .filter(|entry| entry.file_type == crate::overlay::RawFileType::Regular)
             .filter(|entry| {
-                entry
-                    .rel_path
-                    .starts_with(harness_home.join("projects").join("-home-agent-workspace"))
+                entry.rel_path.starts_with(
+                    harness_home
+                        .join("projects")
+                        .join(claude_transcript_project_key(flat_home)),
+                )
             })
             .filter(|entry| {
                 entry
@@ -500,6 +503,14 @@ pub fn locate_harness_transcript(
     }
 }
 
+pub fn claude_transcript_project_key(flat_home: bool) -> &'static str {
+    if flat_home {
+        "-home-agent"
+    } else {
+        "-home-agent-workspace"
+    }
+}
+
 pub fn harness_transcript_sweep(
     entries: &[RawEntry],
     reader: &dyn UpperReader,
@@ -507,8 +518,11 @@ pub fn harness_transcript_sweep(
     harness: HarnessTranscriptKind,
     harness_home: &Path,
     thread_id: &str,
+    flat_home: bool,
 ) -> HarnessTranscriptOutcome {
-    let Some(path) = locate_harness_transcript(entries, harness, harness_home, thread_id) else {
+    let Some(path) =
+        locate_harness_transcript(entries, harness, harness_home, thread_id, flat_home)
+    else {
         return HarnessTranscriptOutcome {
             skipped: true,
             ..HarnessTranscriptOutcome::default()
@@ -992,6 +1006,15 @@ mod tests {
     }
 
     #[test]
+    fn claude_transcript_project_key_tracks_flat_home() {
+        assert_eq!(claude_transcript_project_key(true), "-home-agent");
+        assert_eq!(
+            claude_transcript_project_key(false),
+            "-home-agent-workspace"
+        );
+    }
+
+    #[test]
     fn locates_claude_transcript_at_workspace_project_path() {
         let entries = vec![reg(".claude/projects/-home-agent-workspace/thread-1.jsonl")];
 
@@ -1001,10 +1024,27 @@ mod tests {
                 HarnessTranscriptKind::Claude,
                 Path::new(".claude"),
                 "thread-1",
+                false,
             ),
             Some(PathBuf::from(
                 ".claude/projects/-home-agent-workspace/thread-1.jsonl"
             ))
+        );
+    }
+
+    #[test]
+    fn locates_claude_transcript_at_flat_home_project_path() {
+        let entries = vec![reg(".claude/projects/-home-agent/thread-1.jsonl")];
+
+        assert_eq!(
+            locate_harness_transcript(
+                &entries,
+                HarnessTranscriptKind::Claude,
+                Path::new(".claude"),
+                "thread-1",
+                true,
+            ),
+            Some(PathBuf::from(".claude/projects/-home-agent/thread-1.jsonl"))
         );
     }
 
@@ -1018,6 +1058,7 @@ mod tests {
                 HarnessTranscriptKind::Codex,
                 Path::new(".codex"),
                 "thread-1",
+                true,
             ),
             Some(PathBuf::from(
                 ".codex/sessions/2026/06/21/rollout-thread-1.jsonl"
@@ -1037,7 +1078,8 @@ mod tests {
                 &entries,
                 HarnessTranscriptKind::Claude,
                 Path::new(".claude"),
-                ""
+                "",
+                false,
             ),
             Some(PathBuf::from(
                 ".claude/projects/-home-agent-workspace/thread-2.jsonl"
@@ -1057,7 +1099,8 @@ mod tests {
                 &entries,
                 HarnessTranscriptKind::Codex,
                 Path::new(".codex"),
-                ""
+                "",
+                false,
             ),
             Some(PathBuf::from(
                 ".codex/sessions/2026/06/21/rollout-thread-2.jsonl"
@@ -1083,6 +1126,7 @@ mod tests {
             HarnessTranscriptKind::Claude,
             Path::new(".claude"),
             "thread-1",
+            false,
         );
 
         assert_eq!(

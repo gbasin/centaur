@@ -17,6 +17,8 @@ pub struct SessionManifest {
     pub harness_thread_id: String,
     #[serde(default)]
     pub harness_home: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub flat_home: bool,
     #[serde(default)]
     pub repo: String,
     #[serde(default)]
@@ -36,6 +38,10 @@ pub struct RepoMount {
 
 fn default_agent_uid() -> u32 {
     DEFAULT_AGENT_UID
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -240,6 +246,7 @@ mod tests {
             harness: Some("claude".to_string()),
             harness_thread_id: "thread-123".to_string(),
             harness_home: ".claude".to_string(),
+            flat_home: true,
             repo: "/workspace/repo".to_string(),
             repos: vec![RepoMount {
                 repo: "acme/foo".to_string(),
@@ -255,6 +262,7 @@ mod tests {
         assert_eq!(value["harness"], "claude");
         assert_eq!(value["harness_thread_id"], "thread-123");
         assert_eq!(value["harness_home"], ".claude");
+        assert_eq!(value["flat_home"], true);
         assert_eq!(value["repo"], "/workspace/repo");
         assert_eq!(value["repos"][0]["repo"], "acme/foo");
         assert_eq!(value["repos"][0]["ref"], "main");
@@ -280,6 +288,21 @@ mod tests {
     }
 
     #[test]
+    fn missing_flat_home_deserializes_as_false_for_back_compat() {
+        let manifest: SessionManifest = serde_json::from_value(serde_json::json!({
+            "session": "sess-1",
+            "merged": "/run/centaur/merged/sess-1",
+            "harness": "claude",
+            "harness_thread_id": "thread-123",
+            "harness_home": ".claude",
+            "repo": "/workspace/repo"
+        }))
+        .unwrap();
+
+        assert!(!manifest.flat_home);
+    }
+
+    #[test]
     fn manifest_serializes_null_harness() {
         let manifest = SessionManifest {
             session: "sess-1".to_string(),
@@ -287,6 +310,7 @@ mod tests {
             harness: None,
             harness_thread_id: String::new(),
             harness_home: String::new(),
+            flat_home: false,
             repo: String::new(),
             repos: Vec::new(),
             agent_uid: 1001,
@@ -294,6 +318,7 @@ mod tests {
 
         let value = serde_json::to_value(&manifest).unwrap();
         assert!(value["harness"].is_null());
+        assert!(value.get("flat_home").is_none());
     }
 
     #[test]
@@ -316,6 +341,7 @@ mod tests {
                 harness: Some("codex".to_string()),
                 harness_thread_id: String::new(),
                 harness_home: String::new(),
+                flat_home: false,
                 repo: String::new(),
                 repos: Vec::new(),
                 agent_uid: 1001,

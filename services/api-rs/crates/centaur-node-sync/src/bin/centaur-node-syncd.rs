@@ -31,6 +31,7 @@ struct SessionConfig {
     harness: Option<centaur_node_sync::runtime::HarnessTranscriptKind>,
     harness_thread_id: String,
     harness_home: String,
+    flat_home: bool,
     repo: String,
     repo_name: String,
     repo_subdirs: Vec<std::path::PathBuf>,
@@ -54,6 +55,7 @@ fn session_config_from_discovered(
             .and_then(centaur_node_sync::runtime::HarnessTranscriptKind::parse),
         harness_thread_id: discovered.manifest.harness_thread_id.clone(),
         harness_home: discovered.manifest.harness_home.clone(),
+        flat_home: discovered.manifest.flat_home,
         repo_name: repo_name(&repo),
         repo,
         repo_subdirs: repo_lane_subdirs(&discovered.manifest.repos),
@@ -312,6 +314,7 @@ mod linux_daemon {
             harness: HarnessTranscriptKind::parse(&env("NODE_SYNC_HARNESS")),
             harness_thread_id: env("NODE_SYNC_HARNESS_THREAD_ID"),
             harness_home: env("NODE_SYNC_HARNESS_HOME"),
+            flat_home: false,
             repo: env("NODE_SYNC_REPO"),
             repo_name: repo_name(&env("NODE_SYNC_REPO")),
             repo_subdirs: Vec::new(),
@@ -720,6 +723,7 @@ mod linux_daemon {
                         harness,
                         &harness_home,
                         &session.harness_thread_id,
+                        session.flat_home,
                     );
                     if let Some((path, bytes)) = out.captured {
                         println!(
@@ -933,6 +937,7 @@ mod tests {
                 harness: Some("codex".to_string()),
                 harness_thread_id: "thread-123".to_string(),
                 harness_home: ".codex".to_string(),
+                flat_home: false,
                 repo: String::new(),
                 repos,
                 agent_uid: 1001,
@@ -957,6 +962,7 @@ mod tests {
         );
         assert_eq!(session_config.harness_thread_id, "thread-123");
         assert_eq!(session_config.harness_home, ".codex");
+        assert!(!session_config.flat_home);
         assert_eq!(session_config.repo, "");
         assert_eq!(session_config.repo_name, "");
         assert_eq!(
