@@ -200,6 +200,18 @@ pub fn classify_entry(
     {
         return EntryLane::HarnessState;
     }
+    // Flat-~ home capture: the agent's home IS the workspace, so top-level dotfile
+    // entries are toolchain/config/cache/state plumbing, never deliverables
+    // (.cargo/.config/.cache/.npm/.state/.branches). Harness homes (.claude/.codex)
+    // are matched just above and routed to HarnessState; auth is Denied above that.
+    // Only the FIRST component is checked, so a deliverable that merely *contains*
+    // a dotfile deeper down (e.g. myproject/.github/workflows/ci.yml) is still captured.
+    if path_components
+        .first()
+        .is_some_and(|first| first.starts_with('.'))
+    {
+        return EntryLane::Denied;
+    }
     EntryLane::Artifact
 }
 
@@ -693,8 +705,53 @@ mod tests {
             EntryLane::HarnessState
         );
         assert_eq!(
-            classify_entry(Path::new(".codex/sessions/y/rollout.jsonl"), &homes, &[]),
+            classify_entry(
+                Path::new(".codex/sessions/2026/01/01/rollout-x.jsonl"),
+                &homes,
+                &[]
+            ),
             EntryLane::HarnessState
+        );
+    }
+
+    #[test]
+    fn classify_entry_denies_top_level_dotfile_entries_but_allows_nested_dotfiles() {
+        let homes = vec![PathBuf::from(".claude"), PathBuf::from(".codex")];
+
+        for path in [
+            ".cargo/registry/foo.rs",
+            ".config/app/settings.json",
+            ".state/anything",
+        ] {
+            assert_eq!(
+                classify_entry(Path::new(path), &homes, &[]),
+                EntryLane::Denied,
+                "{path} should be denied"
+            );
+        }
+        assert_eq!(
+            classify_entry(
+                Path::new(".claude/projects/x/transcript.jsonl"),
+                &homes,
+                &[]
+            ),
+            EntryLane::HarnessState
+        );
+        assert_eq!(
+            classify_entry(
+                Path::new(".codex/sessions/2026/01/01/rollout-x.jsonl"),
+                &homes,
+                &[]
+            ),
+            EntryLane::HarnessState
+        );
+        assert_eq!(
+            classify_entry(Path::new("report.md"), &homes, &[]),
+            EntryLane::Artifact
+        );
+        assert_eq!(
+            classify_entry(Path::new("myproject/.github/workflows/ci.yml"), &homes, &[]),
+            EntryLane::Artifact
         );
     }
 
