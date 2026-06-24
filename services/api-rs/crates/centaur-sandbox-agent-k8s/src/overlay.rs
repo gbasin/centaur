@@ -132,6 +132,10 @@ pub(crate) fn overlay_manifest_init_container_json(
     json!({
         "name": "overlay-manifest-writer",
         "image": overlay.image,
+        // Mirror the node-sync DaemonSet's pull policy (IfNotPresent). Without an
+        // explicit policy, k8s defaults to Always for a `:latest` tag and the kubelet
+        // fails on a locally-loaded image (no registry to pull from).
+        "imagePullPolicy": "IfNotPresent",
         "command": ["/usr/local/bin/provision-overlay"],
         "args": args,
         "securityContext": {
@@ -160,6 +164,7 @@ pub(crate) fn overlay_readiness_init_container_json(
     json!({
         "name": "overlay-readiness-wait",
         "image": overlay.image,
+        "imagePullPolicy": "IfNotPresent",
         "command": ["/bin/sh", "-ceu", readiness_wait_script(overlay, session)],
         "securityContext": {
             "privileged": false,
