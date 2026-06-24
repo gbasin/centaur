@@ -1,5 +1,8 @@
 # Artifact Capture Report
 
+> **SUPERSEDED 2026-06-24.** Reports the in-pod poll producer, **retired in the poll→daemon cutover (#23)**.
+> Capture is now the node-sync daemon (overlay-upper scan) with flat-`~` the default. Kept for history.
+
 ## Files changed
 
 - `services/api-rs/crates/centaur-session-sqlx/migrations/0019_artifact_blobs.sql`
