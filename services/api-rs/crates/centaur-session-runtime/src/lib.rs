@@ -2307,14 +2307,35 @@ impl SandboxWorkloadMode {
                 // Pin the harness via container args (the image entrypoint is
                 // kept) so the sandbox runs the session's harness rather than
                 // whatever the image CMD defaults to.
+                //
+                // Flat-~ (overlay home): codex/claude config + auth live in the overlay
+                // HOME (~/.codex, ~/.claude) — persisted via the overlay upper and visible
+                // to the node-sync daemon's harness-transcript lane — not the legacy
+                // ephemeral $STATE_DIR (whose dirs the entrypoint no longer creates under
+                // flat-home). Setting it on the SPEC keeps the agent, the overlay manifest
+                // (harness_home derives from CODEX_HOME), and the daemon all consistent.
+                // Keyed off the api-rs's own overlay-flat-home flag.
+                let flat_home = std::env::var("CENTAUR_SANDBOX_OVERLAY_FLAT_HOME")
+                    .map(|v| matches!(v.as_str(), "1" | "true" | "True" | "TRUE" | "yes" | "on"))
+                    .unwrap_or(false);
+                let codex_home = if flat_home {
+                    "/home/agent/.codex"
+                } else {
+                    SANDBOX_CODEX_HOME
+                };
+                let claude_config_dir = if flat_home {
+                    "/home/agent/.claude"
+                } else {
+                    SANDBOX_CLAUDE_CONFIG_DIR
+                };
                 let mut spec = SandboxSpec::new(image)
                     .label("centaur.ai/component", "session-sandbox")
                     .label("centaur.ai/harness", harness.to_string())
                     .args(["harness-server", harness_server_subcommand(harness)])
                     .env("CENTAUR_HARNESS_TYPE", harness_server_subcommand(harness))
                     .env("CENTAUR_STATE_DIR", SANDBOX_STATE_DIR)
-                    .env("CODEX_HOME", SANDBOX_CODEX_HOME)
-                    .env("CLAUDE_CONFIG_DIR", SANDBOX_CLAUDE_CONFIG_DIR)
+                    .env("CODEX_HOME", codex_home)
+                    .env("CLAUDE_CONFIG_DIR", claude_config_dir)
                     .mount(Mount::new(MountKind::EmptyDir, SANDBOX_STATE_DIR));
                 if let Some(thread_key) = thread_key {
                     spec = spec.env("CENTAUR_THREAD_KEY", thread_key.as_str());
