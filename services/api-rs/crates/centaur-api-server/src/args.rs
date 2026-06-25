@@ -974,12 +974,17 @@ impl SandboxArgs {
                 // sessions on the node. Single-tenant — the cache tools are
                 // concurrency-safe (content-addressed stores / flocked registry).
                 if let Some(dep_cache_path) = clean_optional_value(self.dep_cache_path.as_deref()) {
-                    workload = workload.mount(Mount::new(
-                        MountKind::Bind {
-                            source_path: dep_cache_path,
-                        },
-                        SANDBOX_DEP_CACHE_MOUNT_PATH,
-                    ));
+                    workload = workload.mount(
+                        Mount::new(
+                            MountKind::Bind {
+                                source_path: dep_cache_path,
+                            },
+                            SANDBOX_DEP_CACHE_MOUNT_PATH,
+                        )
+                        // hostPath is created root:root by the kubelet; a root init
+                        // container chmods it so the UID-1001 agent can populate it.
+                        .ensure_writable(),
+                    );
                 }
                 Ok(workload)
             }
