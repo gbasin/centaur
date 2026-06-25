@@ -68,6 +68,7 @@ ARG CODEX_VERSION=0.139.0
 ARG PI_CODING_AGENT_VERSION=0.67.2
 ARG NUSHELL_VERSION=0.112.2
 ARG KUBECTL_VERSION=v1.34.2
+ARG KACHE_VERSION=v0.7.0
 # Bootstrap pnpm for agents working in JS monorepos. The exact baked version
 # doesn't constrain repos: when a repo's `packageManager` field declares a
 # different version, pnpm downloads and runs that one (v11 `pmOnFail=download`
@@ -174,6 +175,12 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
     && rustfmt --version \
     && clippy-driver --version \
     && rm -rf "$RUSTUP_HOME/toolchains"/*/share/doc "$RUSTUP_HOME/toolchains"/*/share/man
+RUN --mount=type=cache,target=/opt/centaur/cargo/registry,uid=1001,gid=1001,sharing=locked \
+    --mount=type=cache,target=/opt/centaur/cargo/git,uid=1001,gid=1001,sharing=locked \
+    --mount=type=cache,target=/home/agent/.cache/kache-install-target,uid=1001,gid=1001,sharing=locked \
+    CARGO_TARGET_DIR=/home/agent/.cache/kache-install-target \
+    cargo install --git https://github.com/kunobi-ninja/kache --tag "${KACHE_VERSION}" --locked kache \
+    && kache --version
 RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/opt/centaur/local/bin sh
 RUN curl -fsSL https://bun.sh/install | bash -s "${BUN_VERSION}"
 RUN --mount=type=cache,target=/home/agent/.cache/uv,uid=1001,gid=1001,sharing=locked \
