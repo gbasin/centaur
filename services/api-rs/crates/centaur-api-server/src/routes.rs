@@ -47,8 +47,8 @@ use crate::{
         AnswerQuestionRequest, AnswerQuestionResponse, AppendMessagesRequest,
         AppendMessagesResponse, CancelSessionResponse, CreateSessionRequest, CreateSessionResponse,
         EmitWorkflowEventRequest, EventsQuery, ExecuteSessionRequest, ExecuteSessionResponse,
-        ListWorkflowRunsQuery, OnHarnessConflict, SessionContextResponse, SessionSseEvent,
-        SlackThreadContext, metadata_with_repos, stream_error_sse,
+        ListWorkflowRunsQuery, OnHarnessConflict, PresentArtifactRequest, SessionContextResponse,
+        SessionSseEvent, SlackThreadContext, metadata_with_repos, stream_error_sse,
     },
 };
 
@@ -172,6 +172,10 @@ pub fn build_router_with_app_state(state: AppState) -> Router {
         .route(
             "/agent/executions/{execution_id}/artifacts",
             post(capture_artifact).layer(DefaultBodyLimit::max(MAX_ARTIFACT_UPLOAD_BYTES)),
+        )
+        .route(
+            "/agent/executions/{execution_id}/artifacts/present",
+            post(present_artifact),
         )
         .route(
             "/agent/executions/{execution_id}/artifacts/{artifact_ref}",
@@ -523,6 +527,67 @@ async fn capture_artifact(
         "idempotent": result.event.is_none(),
         "event_id": result.event.as_ref().map(|event| event.event_id),
         "artifact": result.payload,
+    })))
+}
+
+async fn present_artifact(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(execution_id): Path<String>,
+    Json(request): Json<PresentArtifactRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let claims = verify_sandbox_token(&headers)?;
+    let thread_key = state.runtime()?.execution_thread_key(&execution_id).await?;
+    enforce_sandbox_thread_scope(&claims, &thread_key)?;
+
+    let path = request.path.trim();
+    if path.is_empty() {
+        return Err(ApiError::BadRequest(
+            "artifact presentation path is required".to_owned(),
+        ));
+    }
+    let renderer = request
+        .renderer
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("auto");
+    let title = request
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let description = request
+        .description
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    let mut payload = json!({
+        "type": "artifact.presented",
+        "execution_id": execution_id,
+        "path": path,
+        "renderer": renderer,
+    });
+    if let Some(title) = title {
+        payload["title"] = json!(title);
+    }
+    if let Some(description) = description {
+        payload["description"] = json!(description);
+    }
+    if let Some(metadata) = request.metadata {
+        payload["metadata"] = metadata;
+    }
+
+    let event = state
+        .runtime()?
+        .present_artifact(&thread_key, &execution_id, payload.clone())
+        .await?;
+
+    Ok(Json(json!({
+        "ok": true,
+        "event_id": event.event_id,
+        "artifact": payload,
     })))
 }
 

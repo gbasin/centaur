@@ -107,6 +107,19 @@ pub struct AnswerQuestionResponse {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct PresentArtifactRequest {
+    pub path: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub renderer: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub metadata: Option<Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CancelSessionResponse {
     pub ok: bool,
     pub cancelled: bool,

@@ -323,6 +323,122 @@ exec uvx --from {shlex.quote(script["project_dir"])} {shlex.quote(script["name"]
     _write_executable(path, content)
 
 
+def _write_atrium_present(path: Path) -> None:
+    content = """#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+import sys
+
+
+DEFAULT_CONTEXT_DIR = Path("/etc/centaur/runtime-context")
+
+
+def read_context_value(name: str) -> str | None:
+    try:
+        value = (DEFAULT_CONTEXT_DIR / name).read_text().strip()
+    except OSError:
+        return None
+    return value or None
+
+
+def first_nonempty(*values: str | None) -> str | None:
+    for value in values:
+        if value and value.strip():
+            return value.strip()
+    return None
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Present a captured artifact to Atrium as a renderable app or document."
+    )
+    parser.add_argument("path", help="Artifact path to present, usually a captured file under /home/agent or shared/")
+    parser.add_argument("--title", help="Human-readable title shown in Atrium")
+    parser.add_argument(
+        "--renderer",
+        default="auto",
+        help="Renderer hint for Atrium, e.g. html-app, react-jsx, markdown, auto",
+    )
+    parser.add_argument("--description", help="Short note about what this artifact is")
+    parser.add_argument(
+        "--metadata",
+        help="Optional JSON object with additional presentation metadata",
+    )
+    args = parser.parse_args()
+
+    api_url = first_nonempty(os.environ.get("CENTAUR_API_URL"), os.environ.get("CENTAUR_CONTROL_PLANE_URL"))
+    api_key = first_nonempty(
+        os.environ.get("CENTAUR_API_KEY"),
+        os.environ.get("ARTIFACT_CAPTURE_API_KEY"),
+        os.environ.get("CENTAUR_ARTIFACT_API_KEY"),
+    )
+    execution_id = first_nonempty(os.environ.get("CENTAUR_EXECUTION_ID"), read_context_value("execution_id"))
+    thread_key = first_nonempty(os.environ.get("CENTAUR_THREAD_KEY"), read_context_value("thread_key"))
+
+    missing = [
+        name
+        for name, value in [
+            ("CENTAUR_API_URL", api_url),
+            ("CENTAUR_API_KEY", api_key),
+            ("CENTAUR_EXECUTION_ID", execution_id),
+            ("CENTAUR_THREAD_KEY", thread_key),
+        ]
+        if not value
+    ]
+    if missing:
+        print(f"atrium-present missing required runtime values: {', '.join(missing)}", file=sys.stderr)
+        return 2
+
+    metadata = None
+    if args.metadata:
+        try:
+            metadata = json.loads(args.metadata)
+        except json.JSONDecodeError as exc:
+            print(f"--metadata must be valid JSON: {exc}", file=sys.stderr)
+            return 2
+        if not isinstance(metadata, dict):
+            print("--metadata must decode to a JSON object", file=sys.stderr)
+            return 2
+
+    payload: dict[str, object] = {
+        "path": args.path,
+        "renderer": args.renderer,
+    }
+    if args.title:
+        payload["title"] = args.title
+    if args.description:
+        payload["description"] = args.description
+    if metadata is not None:
+        payload["metadata"] = metadata
+
+    headers = {
+        "x-api-key": api_key or "",
+        "x-centaur-thread-key": thread_key or "",
+        "content-type": "application/json",
+    }
+    url = f"{api_url.rstrip('/')}/agent/executions/{execution_id}/artifacts/present"
+    import httpx
+
+    with httpx.Client(timeout=10.0) as client:
+        response = client.post(url, headers=headers, json=payload)
+    if response.status_code >= 400:
+        print(response.text, file=sys.stderr)
+        return 1
+    result = response.json()
+    print(json.dumps(result, separators=(",", ":")))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+"""
+    _write_executable(path, content)
+
+
 def _write_catalog(path: Path, index_path: Path, pythonpath: str) -> None:
     content = f"""#!/usr/bin/env python3
 from __future__ import annotations
@@ -519,6 +635,7 @@ def main(argv: list[str]) -> int:
 
     for name, script in scripts.items():
         _write_tool_shim(bin_dir / name, script, pythonpath)
+    _write_atrium_present(bin_dir / "atrium-present")
 
     index_path = bin_dir / ".centaur-tools.json"
     index_path.write_text(json.dumps(list(scripts.values()), indent=2, sort_keys=True) + "\n")

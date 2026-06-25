@@ -32,6 +32,38 @@ def test_classifies_artifacts_and_junk(tmp_path):
     assert decision.reason in {"path_denied", "junk_extension"}
 
 
+def test_default_roots_include_flat_home_app_paths():
+    roots = artifact_capture.DEFAULT_DIRS.split(":")
+    assert "/home/agent/shared" in roots
+    assert "/home/agent/apps" in roots
+
+
+def test_captures_flat_home_shared_app_html_and_jsx(tmp_path, monkeypatch):
+    monkeypatch.setenv("CENTAUR_EXECUTION_ID", "exe-test")
+    shared = tmp_path / "shared" / "apps" / "demo"
+    shared.mkdir(parents=True)
+    html = shared / "index.html"
+    jsx = shared / "App.jsx"
+    html.write_text("<!doctype html><title>Demo</title>")
+    jsx.write_text("export default function App() { return <main>Demo</main>; }")
+    sent = []
+    capture = artifact_capture.ArtifactCapture(
+        api_url="http://api",
+        api_key="key",
+        dirs=[str(tmp_path / "shared")],
+        sender=lambda artifact, _execution_id, _thread_key: sent.append(artifact),
+    )
+
+    capture.scan_once()
+
+    assert sorted(Path(artifact.path).name for artifact in sent) == ["App.jsx", "index.html"]
+    by_name = {Path(artifact.path).name: artifact for artifact in sent}
+    assert by_name["index.html"].mime == "text/html"
+    # Python's mimetypes does not consistently know JSX; capture allows it by
+    # extension and Atrium previews it by filename.
+    assert by_name["App.jsx"].mime == "application/octet-stream"
+
+
 def test_size_cap_sends_manifest_only(tmp_path, monkeypatch):
     monkeypatch.setenv("CENTAUR_EXECUTION_ID", "exe-test")
     monkeypatch.setenv("CENTAUR_THREAD_KEY", "test:thread")

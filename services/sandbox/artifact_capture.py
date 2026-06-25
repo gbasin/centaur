@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable
 
-DEFAULT_DIRS = "/home/agent/workspace:/tmp:/home/agent/outputs:/var/tmp"
+DEFAULT_DIRS = "/home/agent/workspace:/home/agent/shared:/home/agent/apps:/tmp:/home/agent/outputs:/var/tmp"
 DEFAULT_CONTEXT_DIR = "/etc/centaur/runtime-context"
 DEFAULT_MAX_BYTES = 1_048_576
 DEFAULT_INTERVAL_S = 2.5
@@ -29,6 +29,7 @@ ALLOWED_EXTENSIONS = {
     ".html",
     ".jpeg",
     ".jpg",
+    ".jsx",
     ".json",
     ".md",
     ".mp3",
@@ -37,6 +38,7 @@ ALLOWED_EXTENSIONS = {
     ".png",
     ".svg",
     ".tsv",
+    ".tsx",
     ".txt",
     ".wav",
     ".webp",

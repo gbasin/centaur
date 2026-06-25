@@ -1407,6 +1407,18 @@ impl SessionRuntime {
             .map_err(Into::into)
     }
 
+    pub async fn present_artifact(
+        &self,
+        thread_key: &ThreadKey,
+        execution_id: &str,
+        payload: Value,
+    ) -> Result<SessionEvent, SessionRuntimeError> {
+        self.store
+            .append_event(thread_key, Some(execution_id), "artifact.presented", payload)
+            .await
+            .map_err(Into::into)
+    }
+
     pub async fn get_artifact_blob(
         &self,
         execution_id: &str,

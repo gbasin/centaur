@@ -481,6 +481,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn artifact_present_appends_intentional_presentation_event() {
+        let Some((store, app, thread_key, execution_id)) = artifact_test_app().await else {
+            return;
+        };
+        set_sandbox_test_key();
+        let token = sandbox_test_token(&thread_key);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/agent/executions/{execution_id}/artifacts/present"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("x-api-key", token)
+                    .body(Body::from(
+                        r#"{"path":"shared/apps/demo/index.html","title":"Demo App","renderer":"html-app","description":"Interactive demo"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload = json_body(response).await;
+        assert_eq!(payload["artifact"]["type"], "artifact.presented");
+        assert_eq!(payload["artifact"]["path"], "shared/apps/demo/index.html");
+        assert_eq!(payload["artifact"]["title"], "Demo App");
+        assert_eq!(payload["artifact"]["renderer"], "html-app");
+
+        let events = store
+            .list_events_after(&thread_key, 0, Some(&execution_id), 100)
+            .await
+            .unwrap();
+        let present_events = events
+            .iter()
+            .filter(|event| event.event_type == "artifact.presented")
+            .collect::<Vec<_>>();
+        assert_eq!(present_events.len(), 1);
+        assert_eq!(present_events[0].payload["type"], "artifact.presented");
+        assert_eq!(present_events[0].payload["execution_id"], execution_id);
+        assert_eq!(present_events[0].payload["path"], "shared/apps/demo/index.html");
+    }
+
+    #[tokio::test]
+    async fn artifact_present_rejects_wrong_thread_scope() {
+        let Some((_store, app, _thread_key, execution_id)) = artifact_test_app().await else {
+            return;
+        };
+        set_sandbox_test_key();
+        let token =
+            sandbox_test_token(&ThreadKey::parse("test:wrong-thread").expect("thread key"));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/agent/executions/{execution_id}/artifacts/present"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("x-api-key", token)
+                    .body(Body::from(r#"{"path":"shared/apps/demo/index.html"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
     async fn harness_transcript_proxy_uses_scoped_sandbox_token_and_server_side_key() {
         set_sandbox_test_key();
         unsafe {
