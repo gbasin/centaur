@@ -316,8 +316,60 @@ try:
 except json.JSONDecodeError as exc:
     print(f"ignoring invalid CLAUDE_SETTINGS_OVERLAY: {exc}", file=sys.stderr)
     sys.exit(0)
+if not isinstance(overlay, dict):
+    print("ignoring CLAUDE_SETTINGS_OVERLAY: expected a JSON object", file=sys.stderr)
+    sys.exit(0)
 existing = path.read_text() if path.exists() else ""
-base = json.loads(existing) if existing.strip() else {}
+try:
+    base = json.loads(existing) if existing.strip() else {}
+except json.JSONDecodeError as exc:
+    print(f"ignoring invalid existing Claude settings: {exc}", file=sys.stderr)
+    base = {}
+if not isinstance(base, dict):
+    print("ignoring existing Claude settings: expected a JSON object", file=sys.stderr)
+    base = {}
+
+def _deep_merge(b, o):
+    for key, value in o.items():
+        if isinstance(value, dict) and isinstance(b.get(key), dict):
+            _deep_merge(b[key], value)
+        else:
+            b[key] = value
+    return b
+
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(_deep_merge(base, overlay), indent=2) + "\n")
+PYEOF
+fi
+
+# CLAUDE_USER_CONFIG_OVERLAY: deep-merge an operator-supplied JSON fragment into
+# Claude Code's user config file. This is intentionally separate from
+# settings.json because Claude stores user-level mcpServers in .claude.json.
+if [ -n "${CLAUDE_USER_CONFIG_OVERLAY:-}" ]; then
+    CLAUDE_USER_CONFIG_PATH="${CLAUDE_CONFIG_DIR:-$HOME_DIR/.claude}/.claude.json" python3 - <<'PYEOF'
+import json
+import os
+import sys
+from pathlib import Path
+
+path = Path(os.environ["CLAUDE_USER_CONFIG_PATH"])
+try:
+    overlay = json.loads(os.environ["CLAUDE_USER_CONFIG_OVERLAY"])
+except json.JSONDecodeError as exc:
+    print(f"ignoring invalid CLAUDE_USER_CONFIG_OVERLAY: {exc}", file=sys.stderr)
+    sys.exit(0)
+if not isinstance(overlay, dict):
+    print("ignoring CLAUDE_USER_CONFIG_OVERLAY: expected a JSON object", file=sys.stderr)
+    sys.exit(0)
+existing = path.read_text() if path.exists() else ""
+try:
+    base = json.loads(existing) if existing.strip() else {}
+except json.JSONDecodeError as exc:
+    print(f"ignoring invalid existing Claude user config: {exc}", file=sys.stderr)
+    base = {}
+if not isinstance(base, dict):
+    print("ignoring existing Claude user config: expected a JSON object", file=sys.stderr)
+    base = {}
 
 def _deep_merge(b, o):
     for key, value in o.items():

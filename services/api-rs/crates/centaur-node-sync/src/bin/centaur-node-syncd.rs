@@ -140,7 +140,7 @@ mod linux_daemon {
     use centaur_node_sync::quiesce::{LeaseGate, apply_quiesced_writes};
     use centaur_node_sync::runtime::{
         AtriumClient, HarnessTranscriptKind, UpperReader, capture_sweep, harness_transcript_sweep,
-        inbound_sweep, partition_entries_by_lane, sha_hex,
+        inbound_sweep, partition_entries_by_lane, profile_candidate_sweep, sha_hex,
     };
     use centaur_node_sync::session_manifest::discover_sessions;
     use centaur_node_sync::state::DaemonState;
@@ -769,6 +769,31 @@ mod linux_daemon {
                         );
                     } else if let Some(error) = out.error {
                         eprintln!("session {}: harness transcript: {error}", session.session);
+                    }
+
+                    let out = profile_candidate_sweep(
+                        &partitioned.harness_entries,
+                        &reader,
+                        client,
+                        harness,
+                        &harness_home,
+                    );
+                    for warning in &out.warnings {
+                        eprintln!(
+                            "session {}: profile candidates warning: {warning}",
+                            session.session
+                        );
+                    }
+                    if out.uploaded {
+                        println!(
+                            "session {}: profile candidates: uploaded {} candidates, {} exclusions for {}",
+                            session.session,
+                            out.candidate_count,
+                            out.excluded_count,
+                            harness.atrium_harness()
+                        );
+                    } else if let Some(error) = out.error {
+                        eprintln!("session {}: profile candidates: {error}", session.session);
                     }
                 }
             }

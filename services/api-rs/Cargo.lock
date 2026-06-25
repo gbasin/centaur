@@ -876,12 +876,15 @@ dependencies = [
 name = "centaur-node-sync"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "libc",
  "regex",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror",
+ "toml",
  "ureq",
  "xattr",
 ]

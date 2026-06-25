@@ -49,6 +49,16 @@ pub trait AtriumClient {
     fn put_harness_transcript(&mut self, _harness: &str, _bytes: &[u8]) -> Result<(), String> {
         Ok(())
     }
+    /// PUT redacted agent profile candidates derived from harness config files.
+    /// This is internal harness state, not an artifact, and must contain only
+    /// sanitized JSON (never raw source bytes).
+    fn put_profile_candidates(
+        &mut self,
+        _harness: &str,
+        _payload: &serde_json::Value,
+    ) -> Result<(), String> {
+        Ok(())
+    }
     /// Poll the gap-free change-feed past `cursor` → (path, remote-change) rows +
     /// the next cursor. Default: nothing (the live HTTP impl overrides it).
     fn poll_changes(
@@ -188,6 +198,9 @@ pub fn classify_entry(
     if is_denied_path(&path_components) {
         return EntryLane::Denied;
     }
+    if matches!(path_components.as_slice(), [file] if file == ".claude.json") {
+        return EntryLane::HarnessState;
+    }
     if repo_subdirs
         .iter()
         .any(|subdir| first_component_matches_normalized_subdir(&path_components, subdir))
@@ -310,6 +323,16 @@ fn is_junk_binary_file(file_name: &str) -> bool {
 #[derive(Debug, Default)]
 pub struct HarnessTranscriptOutcome {
     pub captured: Option<(PathBuf, usize)>,
+    pub skipped: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Default)]
+pub struct ProfileCandidateSweepOutcome {
+    pub uploaded: bool,
+    pub candidate_count: usize,
+    pub excluded_count: usize,
+    pub warnings: Vec<String>,
     pub skipped: bool,
     pub error: Option<String>,
 }
@@ -546,6 +569,52 @@ pub fn harness_transcript_sweep(
     }
 }
 
+pub fn profile_candidate_sweep(
+    entries: &[RawEntry],
+    reader: &dyn UpperReader,
+    client: &mut dyn AtriumClient,
+    harness: HarnessTranscriptKind,
+    harness_home: &Path,
+) -> ProfileCandidateSweepOutcome {
+    let report = crate::profile_candidates::extract_profile_candidates(
+        entries,
+        reader,
+        harness,
+        harness_home,
+    );
+    let source_count = report
+        .manifest
+        .get("source_count")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+    let candidate_count = report.candidates.len();
+    let excluded_count = report.excluded.len();
+    let warnings = report.warnings.clone();
+    if source_count == 0 && candidate_count == 0 && excluded_count == 0 && warnings.is_empty() {
+        return ProfileCandidateSweepOutcome {
+            skipped: true,
+            ..ProfileCandidateSweepOutcome::default()
+        };
+    }
+    let payload = report.into_payload();
+    match client.put_profile_candidates(harness.atrium_harness(), &payload) {
+        Ok(()) => ProfileCandidateSweepOutcome {
+            uploaded: true,
+            candidate_count,
+            excluded_count,
+            warnings,
+            ..ProfileCandidateSweepOutcome::default()
+        },
+        Err(error) => ProfileCandidateSweepOutcome {
+            candidate_count,
+            excluded_count,
+            warnings,
+            error: Some(error),
+            ..ProfileCandidateSweepOutcome::default()
+        },
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct WipSweepOutcome {
     pub captured: Vec<(String, u64, String)>,
@@ -681,6 +750,7 @@ mod tests {
         captures: Vec<(String, u64)>,
         deletes: Vec<(String, u64)>,
         transcripts: Vec<(String, Vec<u8>)>,
+        profile_candidates: Vec<(String, serde_json::Value)>,
         next_seq: u64,
     }
     impl AtriumClient for FakeClient {
@@ -699,6 +769,15 @@ mod tests {
         }
         fn put_harness_transcript(&mut self, harness: &str, bytes: &[u8]) -> Result<(), String> {
             self.transcripts.push((harness.to_owned(), bytes.to_vec()));
+            Ok(())
+        }
+        fn put_profile_candidates(
+            &mut self,
+            harness: &str,
+            payload: &serde_json::Value,
+        ) -> Result<(), String> {
+            self.profile_candidates
+                .push((harness.to_owned(), payload.clone()));
             Ok(())
         }
         fn atrium_changes(&self, since: &str) -> Result<(Vec<String>, String), String> {
@@ -779,6 +858,10 @@ mod tests {
                 &homes,
                 &[]
             ),
+            EntryLane::HarnessState
+        );
+        assert_eq!(
+            classify_entry(Path::new(".claude.json"), &homes, &[]),
             EntryLane::HarnessState
         );
         assert_eq!(
@@ -1163,6 +1246,36 @@ mod tests {
             client.transcripts,
             vec![("claude".to_owned(), b"{\"type\":\"assistant\"}\n".to_vec())]
         );
+    }
+
+    #[test]
+    fn profile_candidate_sweep_puts_sanitized_payload_without_artifact_capture() {
+        let entries = vec![reg(".codex/config.toml")];
+        let mut files = HashMap::new();
+        files.insert(
+            PathBuf::from(".codex/config.toml"),
+            b"model = \"gpt-5\"\napi_key = \"sk-secretsecretsecretsecretsecret\"\n".to_vec(),
+        );
+        let reader = MapReader(files);
+        let mut client = FakeClient::default();
+
+        let out = profile_candidate_sweep(
+            &entries,
+            &reader,
+            &mut client,
+            HarnessTranscriptKind::Codex,
+            Path::new(".codex"),
+        );
+
+        assert!(out.uploaded);
+        assert_eq!(out.candidate_count, 1);
+        assert!(client.captures.is_empty());
+        assert_eq!(client.profile_candidates.len(), 1);
+        assert_eq!(client.profile_candidates[0].0, "codex");
+        let serialized = serde_json::to_string(&client.profile_candidates[0].1).unwrap();
+        assert!(serialized.contains("\"provider\":\"codex\""));
+        assert!(serialized.contains("profile-candidates/v1"));
+        assert!(!serialized.contains("sk-secret"));
     }
 
     #[test]

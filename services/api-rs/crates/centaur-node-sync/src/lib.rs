@@ -23,6 +23,7 @@ pub mod manifest;
 pub mod materializer;
 pub mod overlay;
 pub mod overlay_mount;
+pub mod profile_candidates;
 pub mod quiesce;
 pub mod runtime;
 pub mod safety;

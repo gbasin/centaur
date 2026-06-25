@@ -215,6 +215,20 @@ impl AtriumClient for HttpAtriumClient {
             .map_err(|e| format!("put harness transcript {harness}: {e}"))
     }
 
+    fn put_profile_candidates(
+        &mut self,
+        harness: &str,
+        payload: &serde_json::Value,
+    ) -> Result<(), String> {
+        self.agent
+            .put(&self.url(&format!("/profile-candidates?harness={}", enc(harness))))
+            .set("x-api-key", &self.api_key)
+            .set("content-type", "application/json")
+            .send_json(payload)
+            .map(|_| ())
+            .map_err(|e| format!("put profile candidates {harness}: {e}"))
+    }
+
     fn poll_changes(
         &mut self,
         cursor: &str,
@@ -320,6 +334,16 @@ mod tests {
         assert_eq!(
             client.url("/harness-transcript?harness=claude"),
             "http://atrium/api/internal/sessions/slack:C123:123.456/harness-transcript?harness=claude"
+        );
+    }
+
+    #[test]
+    fn profile_candidates_url_uses_internal_session_endpoint() {
+        let client = HttpAtriumClient::new("http://atrium/", "key", "slack:C123:123.456");
+
+        assert_eq!(
+            client.url("/profile-candidates?harness=codex"),
+            "http://atrium/api/internal/sessions/slack:C123:123.456/profile-candidates?harness=codex"
         );
     }
 
