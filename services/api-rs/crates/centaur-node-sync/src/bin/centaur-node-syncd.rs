@@ -126,7 +126,7 @@ fn main() {
 
 #[cfg(target_os = "linux")]
 mod linux_daemon {
-    use super::{SessionConfig, repo_name, session_config_from_discovered};
+    use super::{SessionConfig, repo_worktrees, session_config_from_discovered};
     use centaur_node_sync::backpressure;
     use centaur_node_sync::backpressure::Budget;
     use centaur_node_sync::cas::hydrate_artifact_lower_into_plan;
