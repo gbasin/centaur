@@ -195,6 +195,11 @@ sandbox:
     pullPolicy: Always
   runtimeClassName: ""
   reposPath: ""
+  # Node-local dep/compile cache root, bind-mounted read-write into every session
+  # + warm sandbox (pnpm store, cargo registry, uv, sccache). Shared across
+  # sessions on the node so installs/builds reuse prior work. Set "" to disable
+  # (sandboxes build cold). Auto-created on the node (hostPath DirectoryOrCreate).
+  depCachePath: /var/lib/centaur/depcache
   # How the in-sandbox harness authenticates upstream. Single source of truth:
   # the control plane reads it to register the matching iron-proxy credential
   # AND propagates it into the sandbox, so the agent's auth.json and the

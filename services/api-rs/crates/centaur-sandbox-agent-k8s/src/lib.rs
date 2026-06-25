@@ -849,6 +849,9 @@ fn mount_json(spec: &SandboxSpec) -> (Vec<Value>, Vec<Value>) {
                 "name": name,
                 "hostPath": {
                     "path": source_path,
+                    // Create the node dir if missing (the dep-cache starts empty
+                    // and is populated by the agent; repo-cache already exists).
+                    "type": "DirectoryOrCreate",
                 },
             }),
         });
