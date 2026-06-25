@@ -23,8 +23,9 @@ use centaur_session_sqlx::{
     PgSessionStore, SessionEventListener, SessionStoreError, default_metadata,
 };
 use centaur_telemetry::{
-    record_sandbox_warm_pool_claim, record_session_execution_finished,
-    record_session_execution_started, record_session_failure, record_session_first_token_latency,
+    export_thread_trace_root_span, record_sandbox_warm_pool_claim,
+    record_session_execution_finished, record_session_execution_started, record_session_failure,
+    record_session_first_token_latency, set_span_parent_trace,
 };
 use dashmap::DashMap;
 use futures_util::{SinkExt, Stream, StreamExt, stream};
@@ -448,7 +449,13 @@ impl SessionRuntime {
             harness_type = %harness_type,
             iron_control_enabled = self.iron_control.is_some(),
         );
+        set_span_parent_trace(
+            &span,
+            &thread_trace_id(thread_key),
+            &thread_trace_parent_span_id(thread_key),
+        );
         let result = async {
+            ensure_thread_trace_root_span(thread_key);
             info!(
                 component = COMPONENT_SESSION_RUNTIME,
                 event = "session_create_or_get_started",
@@ -640,7 +647,13 @@ impl SessionRuntime {
             thread_key = %thread_key,
             message_count = messages.len(),
         );
+        set_span_parent_trace(
+            &span,
+            &thread_trace_id(thread_key),
+            &thread_trace_parent_span_id(thread_key),
+        );
         let result = async {
+            ensure_thread_trace_root_span(thread_key);
             if messages.is_empty() {
                 return Err(SessionRuntimeError::BadRequest(
                     "messages must not be empty".to_owned(),
@@ -868,7 +881,13 @@ impl SessionRuntime {
             input_line_count,
             idempotency_key_present,
         );
+        set_span_parent_trace(
+            &span,
+            &thread_trace_id(thread_key),
+            &thread_trace_parent_span_id(thread_key),
+        );
         let result = async {
+            ensure_thread_trace_root_span(thread_key);
             info!(
                 component = COMPONENT_SESSION_RUNTIME,
                 event = "session_execute_started",
@@ -939,6 +958,11 @@ impl SessionRuntime {
                 execution_id = %execution.execution_id,
                 sandbox_id = tracing::field::Empty,
             );
+            set_span_parent_trace(
+                &execution_trace_span,
+                &thread_trace_id(thread_key),
+                &thread_trace_parent_span_id(thread_key),
+            );
             self.execution_spans
                 .lock()
                 .await
@@ -968,6 +992,7 @@ impl SessionRuntime {
                     session.iron_control_principal.as_deref(),
                     &execution.execution_id,
                 )
+                .instrument(execution_trace_span.clone())
                 .await
             {
                 Ok(sandbox_id) => sandbox_id,
@@ -982,7 +1007,11 @@ impl SessionRuntime {
             execution_trace_span.record("centaur.sandbox_id", sandbox_id.as_str());
             execution_trace_span.record("sandbox_id", sandbox_id.as_str());
 
-            let pipe = match self.ensure_session_pipe(thread_key, &sandbox_id).await {
+            let pipe = match self
+                .ensure_session_pipe(thread_key, &sandbox_id)
+                .instrument(execution_trace_span.clone())
+                .await
+            {
                 Ok(pipe) => pipe,
                 Err(error) => {
                     self.record_execution_failure(thread_key, &execution.execution_id, &error)
@@ -1000,6 +1029,7 @@ impl SessionRuntime {
                 &execution.execution_id,
                 Some(&sandbox_id),
             )
+            .instrument(execution_trace_span.clone())
             .await
             {
                 self.record_execution_failure(thread_key, &execution.execution_id, &error)
@@ -2326,7 +2356,13 @@ async fn run_stdout_pump(
         thread_key = %thread_key,
         sandbox_id,
     );
+    set_span_parent_trace(
+        &span,
+        &thread_trace_id(&thread_key),
+        &thread_trace_parent_span_id(&thread_key),
+    );
     async {
+        ensure_thread_trace_root_span(&thread_key);
         let mut stdout = FramedRead::new(stdout, LinesCodec::new());
         info!(
             component = COMPONENT_SESSION_RUNTIME,
@@ -3910,12 +3946,33 @@ impl SessionTraceContext {
 
 /// Deterministic per-thread trace id: one trace identity per thread without a
 /// `thread_traces` table (derive, don't store).
-fn thread_trace_id(thread_key: &ThreadKey) -> String {
+pub fn thread_trace_id(thread_key: &ThreadKey) -> String {
     uuid::Uuid::new_v5(
         &uuid::Uuid::NAMESPACE_URL,
         format!("centaur:thread:{}", thread_key.as_str()).as_bytes(),
     )
     .to_string()
+}
+
+fn ensure_thread_trace_root_span(thread_key: &ThreadKey) {
+    let trace_id = thread_trace_id(thread_key);
+    let root_span_id = thread_trace_parent_span_id(thread_key);
+    let thread_key = thread_key.as_str().to_owned();
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn(async move {
+            let _ = export_thread_trace_root_span(&trace_id, &root_span_id, &thread_key).await;
+        });
+    }
+}
+
+pub fn thread_trace_parent_span_id(thread_key: &ThreadKey) -> String {
+    let digest = Sha256::digest(format!("centaur:thread-parent:{}", thread_key.as_str()));
+    let mut bytes = [0_u8; 8];
+    bytes.copy_from_slice(&digest[..8]);
+    if bytes.iter().all(|byte| *byte == 0) {
+        bytes[7] = 1;
+    }
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn input_lines_with_session_context(
@@ -5252,6 +5309,16 @@ mod tests {
         assert_ne!(thread_trace_id(&thread_key), thread_trace_id(&other));
         // The wrapper parses this with uuid.UUID(...): must stay a canonical UUID.
         assert!(uuid::Uuid::parse_str(&thread_trace_id(&thread_key)).is_ok());
+        assert_eq!(
+            thread_trace_parent_span_id(&thread_key),
+            thread_trace_parent_span_id(&thread_key)
+        );
+        assert_ne!(
+            thread_trace_parent_span_id(&thread_key),
+            thread_trace_parent_span_id(&other)
+        );
+        assert_eq!(thread_trace_parent_span_id(&thread_key).len(), 16);
+        assert_ne!(thread_trace_parent_span_id(&thread_key), "0000000000000000");
     }
 
     fn session_with_sandbox(sandbox_id: &str) -> Session {
