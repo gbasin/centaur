@@ -53,6 +53,8 @@ fn enc(s: &str) -> String {
 
 #[derive(Debug, Deserialize)]
 struct HydrationScopeResponse {
+    #[serde(rename = "activePrefix")]
+    active_prefix: Option<String>,
     #[serde(default)]
     paths: Vec<HydrationScopePath>,
 }
@@ -68,9 +70,13 @@ struct HydrationScopePath {
     sha: Option<String>,
 }
 
-fn parse_hydration_scope(value: serde_json::Value) -> Result<Vec<CasHydrateEntry>, String> {
+fn parse_hydration_scope(
+    value: serde_json::Value,
+    session_id: &str,
+) -> Result<Vec<CasHydrateEntry>, String> {
     let response = serde_json::from_value::<HydrationScopeResponse>(value)
         .map_err(|e| format!("parse hydration-scope response: {e}"))?;
+    let active_prefix = response.active_prefix.as_deref();
     Ok(response
         .paths
         .into_iter()
@@ -82,13 +88,32 @@ fn parse_hydration_scope(value: serde_json::Value) -> Result<Vec<CasHydrateEntry
             if sha.is_empty() {
                 return None;
             }
-            Some(CasHydrateEntry {
-                path: path.path,
-                seq: path.latest_seq,
-                sha,
-            })
+            Some(
+                local_artifact_paths(&path.path, active_prefix, session_id)
+                    .into_iter()
+                    .map(move |local_path| CasHydrateEntry {
+                        path: local_path,
+                        seq: path.latest_seq,
+                        sha: sha.clone(),
+                    })
+                    .collect::<Vec<_>>(),
+            )
         })
+        .flatten()
         .collect())
+}
+
+fn local_artifact_paths(path: &str, active_prefix: Option<&str>, session_id: &str) -> Vec<String> {
+    if let Some(prefix) = active_prefix.map(|value| value.trim_matches('/')) {
+        if let Some(rest) = path.strip_prefix(&format!("{prefix}/")) {
+            return vec![rest.to_string(), path.to_string()];
+        }
+    }
+    let scratch_prefix = format!("scratch/{session_id}/");
+    if let Some(rest) = path.strip_prefix(&scratch_prefix) {
+        return vec![format!("scratch/{rest}")];
+    }
+    vec![path.to_string()]
 }
 
 impl AtriumClient for HttpAtriumClient {
@@ -177,7 +202,7 @@ impl AtriumClient for HttpAtriumClient {
             .call()
             .map_err(|e| format!("hydration-scope: {e}"))?;
         let value: serde_json::Value = resp.into_json().map_err(|e| e.to_string())?;
-        parse_hydration_scope(value)
+        parse_hydration_scope(value, &self.session_id)
     }
 
     fn put_harness_transcript(&mut self, harness: &str, bytes: &[u8]) -> Result<(), String> {
@@ -208,10 +233,11 @@ impl AtriumClient for HttpAtriumClient {
             .and_then(|c| c.as_str())
             .unwrap_or(cursor)
             .to_string();
+        let active_prefix = v.get("activePrefix").and_then(|p| p.as_str());
         let mut out = Vec::new();
         if let Some(rows) = v.get("rows").and_then(|r| r.as_array()) {
             for row in rows {
-                let path = row
+                let canonical_path = row
                     .get("path")
                     .and_then(|p| p.as_str())
                     .unwrap_or_default()
@@ -230,15 +256,17 @@ impl AtriumClient for HttpAtriumClient {
                     .get("group_id")
                     .and_then(|g| g.as_str())
                     .map(|g| g.to_string());
-                out.push((
-                    path,
-                    RemoteChange {
-                        seq,
-                        sha,
-                        status,
-                        group_id,
-                    },
-                ));
+                for path in local_artifact_paths(&canonical_path, active_prefix, &self.session_id) {
+                    out.push((
+                        path,
+                        RemoteChange {
+                            seq,
+                            sha: sha.clone(),
+                            status,
+                            group_id: group_id.clone(),
+                        },
+                    ));
+                }
             }
         }
         Ok((out, next))
@@ -300,30 +328,81 @@ mod tests {
         let entries = parse_hydration_scope(serde_json::json!({
             "sessionId": "sess-1",
             "scope": "test",
+            "activePrefix": "shared/channels/channel-1",
             "paths": [
-                {"path": "shared/a.txt", "latestSeq": 4, "kind": "file", "sha": "aa11"},
+                {"path": "shared/channels/channel-1/a.txt", "latestSeq": 4, "kind": "file", "sha": "aa11"},
                 {"path": "scratch/sess-1/b.txt", "latestSeq": 5, "kind": "file", "sha": "bb22"},
-                {"path": "shared/deleted.txt", "latestSeq": 6, "kind": "deleted", "sha": "cc33"},
-                {"path": "shared/null.txt", "latestSeq": 7, "kind": "file", "sha": null},
-                {"path": "shared/empty.txt", "latestSeq": 8, "kind": "file", "sha": ""}
+                {"path": "shared/global/c.txt", "latestSeq": 6, "kind": "file", "sha": "cc33"},
+                {"path": "shared/channels/channel-1/deleted.txt", "latestSeq": 7, "kind": "deleted", "sha": "dd44"},
+                {"path": "shared/channels/channel-1/null.txt", "latestSeq": 8, "kind": "file", "sha": null},
+                {"path": "shared/channels/channel-1/empty.txt", "latestSeq": 9, "kind": "file", "sha": ""}
             ]
-        }))
+        }), "sess-1")
         .unwrap();
 
         assert_eq!(
             entries,
             vec![
                 CasHydrateEntry {
-                    path: "shared/a.txt".to_string(),
+                    path: "a.txt".to_string(),
                     seq: 4,
                     sha: "aa11".to_string(),
                 },
                 CasHydrateEntry {
-                    path: "scratch/sess-1/b.txt".to_string(),
+                    path: "shared/channels/channel-1/a.txt".to_string(),
+                    seq: 4,
+                    sha: "aa11".to_string(),
+                },
+                CasHydrateEntry {
+                    path: "scratch/b.txt".to_string(),
                     seq: 5,
                     sha: "bb22".to_string(),
                 },
+                CasHydrateEntry {
+                    path: "shared/global/c.txt".to_string(),
+                    seq: 6,
+                    sha: "cc33".to_string(),
+                },
             ]
+        );
+    }
+
+    #[test]
+    fn local_artifact_paths_project_active_channel_and_own_scratch() {
+        assert_eq!(
+            local_artifact_paths(
+                "shared/channels/channel-1/report.md",
+                Some("shared/channels/channel-1"),
+                "sess-1",
+            ),
+            vec![
+                "report.md".to_string(),
+                "shared/channels/channel-1/report.md".to_string()
+            ]
+        );
+        assert_eq!(
+            local_artifact_paths(
+                "shared/channels/channel-2/report.md",
+                Some("shared/channels/channel-1"),
+                "sess-1",
+            ),
+            vec!["shared/channels/channel-2/report.md".to_string()]
+        );
+        assert_eq!(
+            local_artifact_paths(
+                "scratch/sess-1/draft.md",
+                Some("shared/channels/channel-1"),
+                "sess-1"
+            ),
+            vec!["scratch/draft.md".to_string()]
+        );
+        assert_eq!(
+            local_artifact_paths(
+                "scratch/sess-2/draft.md",
+                Some("shared/channels/channel-1"),
+                "sess-1"
+            ),
+            vec!["scratch/sess-2/draft.md".to_string()]
         );
     }
 }
