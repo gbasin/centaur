@@ -7,17 +7,21 @@
 //! (stress-test-validated: see docs/warmcache-tier-design.md).
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use sha2::{Digest, Sha256};
 
-use crate::cas::{CasHydrateEntry, materialize_cached};
+use crate::cas::{CasHydrateEntry, WarmcacheManifestEntry, materialize_cached};
 use crate::runtime::AtriumClient;
 
 /// Defensive cap on a single warm-cache blob — never buffer an unbounded body into
 /// the node daemon (a store file is small; this guards a bad/oversized manifest entry).
 pub const MAX_WARMCACHE_BLOB_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Matches Atrium's `/cache/manifest` entry cap. A store larger than this can't be
+/// captured per-file (the register would 413) — bail before uploading anything.
+pub const MAX_WARMCACHE_MANIFEST_ENTRIES: usize = 100_000;
 
 /// A dependency ecosystem: which lockfile keys it, and where its store lands in
 /// the node depcache (the `dest_subdir` must match the entrypoint's cache redirects).
@@ -184,6 +188,144 @@ pub fn hydrate_depcache(
         });
     }
     stats
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct CaptureStats {
+    pub kind: String,
+    pub entries: usize,
+    pub uploaded: u64,
+    pub errors: usize,
+    pub error: Option<String>,
+}
+
+/// Capture one dependency store from the node depcache back to Atrium CAS, keyed by
+/// `(lockfile_hash, kind)`. Walks `<depcache>/<dest_subdir>`, uploads each file's
+/// bytes (idempotent — the server dedups), and registers the manifest. Intended to
+/// run only on a cold miss / changed deps (the caller gates that), so a full upload
+/// here is the first population, not a per-session cost.
+pub fn capture_depcache(
+    client: &mut dyn AtriumClient,
+    depcache_root: &Path,
+    dest_subdir: &str,
+    lockfile_hash: &str,
+    kind: &str,
+) -> CaptureStats {
+    // Defense-in-depth: an absolute or `..` dest_subdir would escape the depcache.
+    if dest_subdir.starts_with('/') || dest_subdir.contains("..") {
+        return CaptureStats {
+            kind: kind.to_string(),
+            errors: 1,
+            error: Some(format!("unsafe dest_subdir {dest_subdir:?}")),
+            ..Default::default()
+        };
+    }
+    let store = depcache_root.join(dest_subdir);
+    let mut files = Vec::new();
+    collect_files(&store, &mut files); // transient walk errors are skipped, not fatal
+    // Bail before N uploads if the store will blow Atrium's manifest cap.
+    if files.len() > MAX_WARMCACHE_MANIFEST_ENTRIES {
+        return CaptureStats {
+            kind: kind.to_string(),
+            errors: 1,
+            error: Some(format!(
+                "store has {} files, exceeds the {MAX_WARMCACHE_MANIFEST_ENTRIES} manifest cap",
+                files.len()
+            )),
+            ..Default::default()
+        };
+    }
+    let mut entries: Vec<WarmcacheManifestEntry> = Vec::new();
+    let mut uploaded = 0u64;
+    let mut errors = 0usize;
+    let mut first_err: Option<String> = None;
+    for abs in files {
+        // A non-UTF-8 path can't be a manifest key without lossy collisions — skip+err.
+        let rel = match abs.strip_prefix(&store).ok().and_then(|p| p.to_str()) {
+            Some(s) => s.to_string(),
+            None => {
+                errors += 1;
+                first_err.get_or_insert_with(|| format!("non-UTF-8 path: {}", abs.display()));
+                continue;
+            }
+        };
+        let meta = match std::fs::metadata(&abs) {
+            Ok(m) => m,
+            Err(e) => {
+                // Vanished mid-walk (live store); the capture is no longer complete.
+                errors += 1;
+                first_err.get_or_insert(e.to_string());
+                continue;
+            }
+        };
+        if meta.len() > MAX_WARMCACHE_BLOB_BYTES {
+            errors += 1;
+            first_err.get_or_insert_with(|| format!("oversized store file: {}", abs.display()));
+            continue;
+        }
+        let bytes = match std::fs::read(&abs) {
+            Ok(b) => b,
+            Err(e) => {
+                errors += 1;
+                first_err.get_or_insert(e.to_string());
+                continue;
+            }
+        };
+        // A concurrent install writing this file non-atomically yields a torn read
+        // (size won't match the stat) — never cache partial bytes under a real sha.
+        if bytes.len() as u64 != meta.len() {
+            errors += 1;
+            first_err.get_or_insert_with(|| format!("torn read: {}", abs.display()));
+            continue;
+        }
+        let sha = sha256_hex(&bytes);
+        if let Err(e) = client.put_cache_blob(&sha, &bytes) {
+            errors += 1;
+            first_err.get_or_insert(e);
+            continue;
+        }
+        uploaded += 1;
+        entries.push(WarmcacheManifestEntry {
+            path: rel,
+            sha256: sha,
+            size_bytes: meta.len(),
+        });
+    }
+    // Register only when the FULL store was captured cleanly (errors == 0). A partial
+    // manifest would point at an incomplete store, so a later `--offline` install fails.
+    if !entries.is_empty()
+        && errors == 0
+        && let Err(e) = client.register_cache_manifest(lockfile_hash, kind, &entries)
+    {
+        errors += 1;
+        first_err.get_or_insert(e);
+    }
+    CaptureStats {
+        kind: kind.to_string(),
+        entries: entries.len(),
+        uploaded,
+        errors,
+        error: first_err,
+    }
+}
+
+/// Collect regular files under `dir` (recursively) as absolute paths. Symlinks are
+/// skipped (we capture relocatable store *contents*, not link farms). Transient
+/// errors on a live store (a file vanishing mid-walk) are skipped, not fatal.
+fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return; // a missing store dir = nothing to capture
+    };
+    for entry in rd {
+        let Ok(entry) = entry else { continue };
+        let Ok(ft) = entry.file_type() else { continue };
+        let path = entry.path();
+        if ft.is_dir() {
+            collect_files(&path, out);
+        } else if ft.is_file() {
+            out.push(path);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -378,5 +520,103 @@ mod tests {
         );
         // A ref starting with '-' is rejected outright (option-injection guard).
         assert!(git_show(&repo_dir, "-p", "Cargo.lock").is_none());
+    }
+
+    #[test]
+    fn captures_store_uploads_blobs_and_registers_manifest() {
+        struct CapturingClient {
+            uploaded: Vec<String>,
+            registered: Vec<(String, String, Vec<WarmcacheManifestEntry>)>,
+        }
+        impl AtriumClient for CapturingClient {
+            fn post_capture(&mut self, _: &str, _: u64, _: &[u8]) -> Result<u64, String> {
+                unreachable!()
+            }
+            fn post_delete(&mut self, _: &str, _: u64) -> Result<u64, String> {
+                unreachable!()
+            }
+            fn fetch_bytes(&mut self, _: &str, _: u64) -> Result<Vec<u8>, String> {
+                unreachable!()
+            }
+            fn put_cache_blob(&mut self, sha: &str, _bytes: &[u8]) -> Result<(), String> {
+                self.uploaded.push(sha.to_string());
+                Ok(())
+            }
+            fn register_cache_manifest(
+                &mut self,
+                hash: &str,
+                kind: &str,
+                entries: &[WarmcacheManifestEntry],
+            ) -> Result<(), String> {
+                self.registered
+                    .push((hash.to_string(), kind.to_string(), entries.to_vec()));
+                Ok(())
+            }
+            fn atrium_changes(&self, since: &str) -> Result<(Vec<String>, String), String> {
+                Ok((vec![], since.to_string()))
+            }
+            fn atrium_doc(&self, _: &str, _: &str) -> Result<Vec<u8>, String> {
+                unreachable!()
+            }
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let depcache = tmp.path().join("depcache");
+        let store = depcache.join("pnpm-store");
+        fs::create_dir_all(store.join("react")).unwrap();
+        fs::write(store.join("react/package.json"), b"react pkg").unwrap();
+        fs::write(store.join("lodash.js"), b"lodash").unwrap();
+
+        let mut client = CapturingClient {
+            uploaded: vec![],
+            registered: vec![],
+        };
+        let stats = capture_depcache(&mut client, &depcache, "pnpm-store", "lock123", "pnpm");
+
+        assert_eq!(stats.uploaded, 2);
+        assert_eq!(stats.errors, 0);
+        assert_eq!(client.uploaded.len(), 2);
+        assert_eq!(client.registered.len(), 1);
+        let (hash, kind, entries) = &client.registered[0];
+        assert_eq!(hash, "lock123");
+        assert_eq!(kind, "pnpm");
+        assert_eq!(entries.len(), 2);
+        let react = entries
+            .iter()
+            .find(|e| e.path == "react/package.json")
+            .expect("react entry");
+        assert_eq!(react.sha256, sha256_hex(b"react pkg"));
+        assert!(entries.iter().any(|e| e.path == "lodash.js"));
+    }
+
+    #[test]
+    fn capture_rejects_unsafe_dest_subdir() {
+        struct NoopClient;
+        impl AtriumClient for NoopClient {
+            fn post_capture(&mut self, _: &str, _: u64, _: &[u8]) -> Result<u64, String> {
+                unreachable!()
+            }
+            fn post_delete(&mut self, _: &str, _: u64) -> Result<u64, String> {
+                unreachable!()
+            }
+            fn fetch_bytes(&mut self, _: &str, _: u64) -> Result<Vec<u8>, String> {
+                unreachable!()
+            }
+            fn put_cache_blob(&mut self, _: &str, _: &[u8]) -> Result<(), String> {
+                panic!("must not upload for an unsafe dest_subdir")
+            }
+            fn atrium_changes(&self, since: &str) -> Result<(Vec<String>, String), String> {
+                Ok((vec![], since.to_string()))
+            }
+            fn atrium_doc(&self, _: &str, _: &str) -> Result<Vec<u8>, String> {
+                unreachable!()
+            }
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        for bad in ["/etc", "../escape", "a/../../b"] {
+            let stats = capture_depcache(&mut NoopClient, tmp.path(), bad, "h", "pnpm");
+            assert_eq!(stats.errors, 1, "{bad} should be rejected");
+            assert_eq!(stats.entries, 0);
+        }
     }
 }

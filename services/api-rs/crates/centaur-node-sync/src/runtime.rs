@@ -60,6 +60,21 @@ pub trait AtriumClient {
     fn fetch_cache_blob(&mut self, _sha256: &str) -> Result<Vec<u8>, String> {
         Err("fetch_cache_blob not supported by this client".to_string())
     }
+    /// Upload a warm-cache blob by content sha (capture/write-back). Idempotent —
+    /// the server dedups on the durable CAS. Default errors — implementors override.
+    fn put_cache_blob(&mut self, _sha256: &str, _bytes: &[u8]) -> Result<(), String> {
+        Err("put_cache_blob not supported by this client".to_string())
+    }
+    /// Register a warm-cache manifest for a dependency set (atomic replace).
+    /// Default errors — implementors override.
+    fn register_cache_manifest(
+        &mut self,
+        _lockfile_hash: &str,
+        _kind: &str,
+        _entries: &[crate::cas::WarmcacheManifestEntry],
+    ) -> Result<(), String> {
+        Err("register_cache_manifest not supported by this client".to_string())
+    }
     /// PUT the harness CLI's own transcript snapshot. This is internal harness
     /// state, not an artifact, so it bypasses the artifact ledger.
     fn put_harness_transcript(&mut self, _harness: &str, _bytes: &[u8]) -> Result<(), String> {
