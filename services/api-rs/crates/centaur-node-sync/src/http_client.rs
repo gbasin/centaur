@@ -263,6 +263,40 @@ impl AtriumClient for HttpAtriumClient {
         Ok(buf)
     }
 
+    fn put_cache_blob(&mut self, sha256: &str, bytes: &[u8]) -> Result<(), String> {
+        // Workspace-agnostic content-addressed upload (idempotent; server dedups).
+        self.agent
+            .put(&format!(
+                "{}/api/internal/cache/blob?sha256={}",
+                self.base_url,
+                enc(sha256)
+            ))
+            .set("x-api-key", &self.api_key)
+            .set("content-type", "application/octet-stream")
+            .send_bytes(bytes)
+            .map_err(|e| format!("put cache blob {sha256}: {e}"))?;
+        Ok(())
+    }
+
+    fn register_cache_manifest(
+        &mut self,
+        lockfile_hash: &str,
+        kind: &str,
+        entries: &[crate::cas::WarmcacheManifestEntry],
+    ) -> Result<(), String> {
+        let body = serde_json::json!({
+            "lockfile_hash": lockfile_hash,
+            "kind": kind,
+            "entries": entries,
+        });
+        self.agent
+            .put(&self.url("/cache/manifest"))
+            .set("x-api-key", &self.api_key)
+            .send_json(body)
+            .map_err(|e| format!("register cache manifest: {e}"))?;
+        Ok(())
+    }
+
     fn put_harness_transcript(&mut self, harness: &str, bytes: &[u8]) -> Result<(), String> {
         self.agent
             .put(&self.url(&format!("/harness-transcript?harness={}", enc(harness))))

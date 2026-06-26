@@ -25,8 +25,9 @@ pub struct CasHydrateEntry {
 }
 
 /// One warm-cache manifest entry: a dependency-store file path + its content hash.
-/// Returned by Atrium's `/api/internal/sessions/:id/cache/hydration` route.
-#[derive(Debug, Clone, Eq, PartialEq, serde::Deserialize)]
+/// Returned by Atrium's `/api/internal/sessions/:id/cache/hydration` route, and
+/// sent back (capture) to `.../cache/manifest`.
+#[derive(Debug, Clone, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct WarmcacheManifestEntry {
     pub path: String,
     pub sha256: String,
