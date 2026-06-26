@@ -61,11 +61,12 @@ pub trait AtriumClient {
         Err("fetch_cache_blob not supported by this client".to_string())
     }
     /// Upload a warm-cache blob by content sha (capture/write-back). Idempotent —
-    /// the server dedups on the durable CAS. Default no-op so fakes compile.
+    /// the server dedups on the durable CAS. Default errors — implementors override.
     fn put_cache_blob(&mut self, _sha256: &str, _bytes: &[u8]) -> Result<(), String> {
         Err("put_cache_blob not supported by this client".to_string())
     }
     /// Register a warm-cache manifest for a dependency set (atomic replace).
+    /// Default errors — implementors override.
     fn register_cache_manifest(
         &mut self,
         _lockfile_hash: &str,
