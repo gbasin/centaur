@@ -18,6 +18,16 @@ file to POST — putting the app at the path below *is* presenting it.
 - It auto-surfaces once captured. The human previews it in a sandboxed iframe and can
   Publish it to a durable, launchable version.
 
+Before writing, probe the exact target directory:
+
+```sh
+mkdir -p shared/apps/<slug> && test -w shared/apps/<slug>
+```
+
+If the target is not writable, stop and report the exact permission problem. Do **not**
+use `sudo`, rename/replace `shared`, write to `shared.root-owned`, or create a
+lookalike path elsewhere; Atrium will not present those files as the requested app.
+
 ## Optional metadata
 
 By default the tile's title is the `<slug>` and the renderer is inferred from the
@@ -39,6 +49,24 @@ All fields optional. `entry` may point at a non-default file (e.g. `"App.jsx"` w
   under `shared/apps/<slug>/`. Do not ship `node_modules`, source maps, or lockfiles.
 - Keep artifacts reasonably small — very large bundles may be captured as metadata
   only and won't preview.
+
+## Preview mode design
+
+When the app supports `index.html?preview=1`, treat that as an embedded Atrium
+card surface, not a miniature standalone landing page.
+
+- Keep a subtly distinct app background so the generated app does not look like
+  native Atrium UI, but keep outer padding tight: roughly 8-12px.
+- Avoid large centered stage wrappers, showcase cards, heavy shadows, and thick
+  decorative borders in preview mode.
+- Prefer a full-width compact layout that uses most of the iframe area.
+- Repeated records can use small cards or rows, but do not wrap the entire
+  preview in another large card inside Atrium's card.
+- Minimize empty margins and decorative chrome. Put useful interactive content
+  near the top of the preview.
+- Full mode may be more spacious and app-like; preview mode should be dense,
+  scannable, and sized to render well in an Atrium thread without inner scrollbars
+  for ordinary content.
 
 ## Runtime assumptions (the preview is a locked-down static browser sandbox)
 

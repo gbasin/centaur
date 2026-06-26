@@ -13,6 +13,17 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+#[cfg(unix)]
+fn make_agent_writable_dir(path: &Path) {
+    use std::os::unix::fs::{PermissionsExt, chown};
+
+    let _ = chown(path, Some(1001), Some(1001));
+    let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o775));
+}
+
+#[cfg(not(unix))]
+fn make_agent_writable_dir(_path: &Path) {}
+
 use crate::overlay_mount::OverlayMountPlan;
 use crate::runtime::AtriumClient;
 
@@ -150,6 +161,14 @@ pub fn materialize_cached(
             let dst = lower_root.join(&e.path);
             if let Some(parent) = dst.parent() {
                 fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+                for ancestor in parent.ancestors() {
+                    if ancestor == lower_root.parent().unwrap_or(lower_root) {
+                        break;
+                    }
+                    if ancestor.starts_with(lower_root) {
+                        make_agent_writable_dir(ancestor);
+                    }
+                }
             }
             let reflinked =
                 reflink_or_copy(&cas_path(cas_dir, &e.sha), &dst).map_err(|err| err.to_string())?;
@@ -288,7 +307,7 @@ mod tests {
             },
             // same blob as a.md (dedup) under a different path
             CasHydrateEntry {
-                path: "shared/copy.md".into(),
+                path: "shared/apps/demo/index.html".into(),
                 seq: 7,
                 sha: "aa11".into(),
             },
@@ -302,12 +321,28 @@ mod tests {
         assert_eq!(out.fetched, 2, "shared sha fetched once");
         assert_eq!(out.base_seqs.get("proj-x/a.md"), Some(&5));
         assert!(lower.join("proj-x/a.md").exists());
-        assert!(lower.join("shared/copy.md").exists());
-        // copy.md materialized from the SAME cached blob as a.md.
+        assert!(lower.join("shared/apps/demo/index.html").exists());
+        // index.html materialized from the SAME cached blob as a.md.
         assert_eq!(
-            fs::read(lower.join("shared/copy.md")).unwrap(),
+            fs::read(lower.join("shared/apps/demo/index.html")).unwrap(),
             fs::read(lower.join("proj-x/a.md")).unwrap(),
         );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let shared_mode = fs::metadata(lower.join("shared"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            let apps_mode = fs::metadata(lower.join("shared/apps"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(shared_mode, 0o775);
+            assert_eq!(apps_mode, 0o775);
+        }
         assert!(out.errors.is_empty());
         let _ = fs::remove_dir_all(&root);
     }
