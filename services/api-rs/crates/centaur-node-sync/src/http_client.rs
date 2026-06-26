@@ -208,6 +208,47 @@ impl AtriumClient for HttpAtriumClient {
         parse_hydration_scope(value, &self.session_id)
     }
 
+    fn warmcache_manifest(
+        &self,
+        lockfile_hash: &str,
+        kind: &str,
+    ) -> Result<Vec<crate::cas::WarmcacheManifestEntry>, String> {
+        let resp = self
+            .agent
+            .get(&self.url(&format!(
+                "/cache/hydration?lockfile_hash={}&kind={}",
+                enc(lockfile_hash),
+                enc(kind)
+            )))
+            .set("x-api-key", &self.api_key)
+            .call()
+            .map_err(|e| format!("cache/hydration: {e}"))?;
+        #[derive(serde::Deserialize)]
+        struct Resp {
+            #[serde(default)]
+            entries: Vec<crate::cas::WarmcacheManifestEntry>,
+        }
+        let parsed: Resp = resp.into_json().map_err(|e| e.to_string())?;
+        Ok(parsed.entries)
+    }
+
+    fn fetch_cache_blob(&mut self, sha256: &str) -> Result<Vec<u8>, String> {
+        // The blob route is workspace-agnostic (content-addressed), not session-scoped.
+        let resp = self
+            .agent
+            .get(&format!(
+                "{}/api/internal/cache/blob?sha256={}",
+                self.base_url,
+                enc(sha256)
+            ))
+            .set("x-api-key", &self.api_key)
+            .call()
+            .map_err(|e| format!("cache/blob: {e}"))?;
+        let mut buf = Vec::new();
+        std::io::Read::read_to_end(&mut resp.into_reader(), &mut buf).map_err(|e| e.to_string())?;
+        Ok(buf)
+    }
+
     fn put_harness_transcript(&mut self, harness: &str, bytes: &[u8]) -> Result<(), String> {
         self.agent
             .put(&self.url(&format!("/harness-transcript?harness={}", enc(harness))))
