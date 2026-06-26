@@ -244,8 +244,22 @@ impl AtriumClient for HttpAtriumClient {
             .set("x-api-key", &self.api_key)
             .call()
             .map_err(|e| format!("cache/blob: {e}"))?;
+        // Defensive: read with a hard cap so an oversized/malicious body can't OOM
+        // the node daemon (into_reader() is a trait object, so cap manually).
+        let cap = crate::warmcache::MAX_WARMCACHE_BLOB_BYTES;
+        let mut reader = resp.into_reader();
         let mut buf = Vec::new();
-        std::io::Read::read_to_end(&mut resp.into_reader(), &mut buf).map_err(|e| e.to_string())?;
+        let mut chunk = [0u8; 64 * 1024];
+        loop {
+            let n = std::io::Read::read(&mut reader, &mut chunk).map_err(|e| e.to_string())?;
+            if n == 0 {
+                break;
+            }
+            if buf.len() as u64 + n as u64 > cap {
+                return Err(format!("cache blob {sha256} exceeds {cap} bytes"));
+            }
+            buf.extend_from_slice(&chunk[..n]);
+        }
         Ok(buf)
     }
 
