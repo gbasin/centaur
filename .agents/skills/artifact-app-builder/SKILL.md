@@ -8,6 +8,31 @@ description: "Build a browser-runnable work product (app, applet, dashboard, dem
 Create a useful static artifact that Atrium captures, presents, and previews. Favor
 business value and a working result over a perfect production architecture.
 
+## When to use this skill
+
+Use this skill even if the user does **not** mention Atrium, artifacts, `shared/apps`,
+preview mode, metadata, or this skill by name. Ordinary requests like these should
+produce an Atrium-presented app:
+
+- "Make me an incident command center for SaaS outages."
+- "Build a sales pipeline dashboard with sample data."
+- "Create an interactive ROI calculator."
+- "Make a small game / simulator / visual report I can try."
+
+If the user asks for something interactive, browser-runnable, app-like, dashboard-like,
+or demo-like, infer the Atrium app contract yourself. Do not ask the user for the
+output path unless the requested app name or scope is genuinely ambiguous.
+
+For a simple request, choose:
+
+- a slug from the request, e.g. `incident-command-center`, `sales-pipeline-dashboard`;
+- output path `shared/apps/<slug>/index.html`;
+- metadata path `shared/apps/<slug>/atrium.app.json`;
+- embedded sample data when the user has not supplied real data;
+- `index.html?preview=1` preview mode;
+- an `atrium.app.json` that includes title, description, entrypoint, renderer,
+  preview URL, preview sizing, and isolated state policy.
+
 ## How presentation works (no command needed)
 
 Presentation is **automatic**: build the app in the right place and it shows up for
@@ -40,6 +65,38 @@ entry file. To customize, drop a sibling `shared/apps/<slug>/atrium.app.json`:
 All fields optional. `entry` may point at a non-default file (e.g. `"App.jsx"` with
 `"renderer": "react-jsx"`), but prefer a built `index.html` for real apps.
 
+For user-facing app requests, metadata is effectively required because it teaches
+Atrium how to render the inline preview. Prefer this shape:
+
+```json
+{
+  "title": "Incident Command Center",
+  "description": "Interactive SaaS outage dashboard with severity and status filters.",
+  "entrypoint": "index.html",
+  "renderer": "html-app",
+  "preview": {
+    "enabled": true,
+    "url": "index.html?preview=1",
+    "defaultSize": "card",
+    "sizes": [
+      { "id": "compact", "minWidth": 280, "height": 220 },
+      { "id": "card", "minWidth": 420, "height": 320 },
+      { "id": "wide", "minWidth": 640, "height": 440 },
+      { "id": "expanded", "minWidth": 640, "height": 720 }
+    ]
+  },
+  "state": {
+    "mode": "isolated"
+  }
+}
+```
+
+The app should read both query parameters:
+
+- `preview=1`: render the compact embedded preview surface.
+- `previewSize=<id>`: adapt density/layout for `compact`, `card`, `wide`, or
+  `expanded` when practical. If unsupported, ignore it gracefully.
+
 ## Output contract
 
 - Prefer a single self-contained `index.html` for small/medium artifacts.
@@ -49,6 +106,8 @@ All fields optional. `entry` may point at a non-default file (e.g. `"App.jsx"` w
   under `shared/apps/<slug>/`. Do not ship `node_modules`, source maps, or lockfiles.
 - Keep artifacts reasonably small — very large bundles may be captured as metadata
   only and won't preview.
+- Do not wait for the user to specify the app path. Pick a safe slug and create the
+  standard `shared/apps/<slug>/` files.
 
 ## Preview mode design
 
@@ -67,6 +126,8 @@ card surface, not a miniature standalone landing page.
 - Full mode may be more spacious and app-like; preview mode should be dense,
   scannable, and sized to render well in an Atrium thread without inner scrollbars
   for ordinary content.
+- If `previewSize=expanded`, keep the same embedded style but allow more vertical
+  detail so Atrium's expanded preview can avoid inner scrollbars.
 
 ## Runtime assumptions (the preview is a locked-down static browser sandbox)
 
